@@ -1,0 +1,11 @@
+{
+  "gainDb": 6.0,
+  "captureMode": "device",
+  "deviceIndex": -1,
+  "processId": null,
+  "processName": null,
+  "captureBufferMs": 100,
+  "silenceAfterMs": 150,
+  "silenceChunkMs": 100,
+  "statusIntervalSeconds": 1
+}

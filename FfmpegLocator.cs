@@ -18,10 +18,19 @@ public static class FfmpegLocator
         var wingetPackages = Path.Combine(localAppData, "Microsoft", "WinGet", "Packages");
         if (Directory.Exists(wingetPackages))
         {
-            var ffmpeg = Directory
-                .EnumerateFiles(wingetPackages, "ffmpeg.exe", SearchOption.AllDirectories)
+            var ffmpeg = EnumerateFilesSafe(wingetPackages, "ffmpeg.exe")
                 .Where(path => path.Contains("Gyan.FFmpeg", StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .OrderByDescending(path =>
+                {
+                    try
+                    {
+                        return File.GetLastWriteTimeUtc(path);
+                    }
+                    catch
+                    {
+                        return DateTime.MinValue;
+                    }
+                })
                 .FirstOrDefault();
 
             if (ffmpeg is not null)
@@ -31,6 +40,47 @@ public static class FfmpegLocator
         }
 
         throw new FileNotFoundException("FFmpeg nao encontrado no PATH nem nos pacotes do Winget.");
+    }
+
+    static IEnumerable<string> EnumerateFilesSafe(string root, string pattern)
+    {
+        var pending = new Stack<string>();
+        pending.Push(root);
+
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(directory, pattern);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (var file in files)
+            {
+                yield return file;
+            }
+
+            IEnumerable<string> directories;
+            try
+            {
+                directories = Directory.EnumerateDirectories(directory);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (var child in directories)
+            {
+                pending.Push(child);
+            }
+        }
     }
 
     static bool CommandExists(string command)

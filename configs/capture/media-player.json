@@ -1,0 +1,11 @@
+{
+  "gainDb": 6.0,
+  "captureMode": "process",
+  "deviceIndex": -1,
+  "processId": null,
+  "processName": "Microsoft.Media.Player",
+  "captureBufferMs": 100,
+  "silenceAfterMs": 150,
+  "silenceChunkMs": 100,
+  "statusIntervalSeconds": 1
+}

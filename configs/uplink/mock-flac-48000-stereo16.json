@@ -1,0 +1,13 @@
+{
+  "host": "127.0.0.1",
+  "port": 18081,
+  "bitrate": null,
+  "ffmpegPath": null,
+  "ffmpegLogLevel": "warning",
+  "audioCodec": "flac",
+  "outputFormat": "flac",
+  "outputSampleRate": 48000,
+  "outputChannels": 2,
+  "outputSampleFormat": "s16",
+  "ffmpegExitTimeoutMs": 3000
+}

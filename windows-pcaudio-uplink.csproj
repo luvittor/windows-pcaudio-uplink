@@ -6,6 +6,7 @@
     <RootNamespace>windows_pcaudio_uplink</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,6 +16,9 @@
 
   <ItemGroup>
     <None Update="appsettings*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="configs\**\*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

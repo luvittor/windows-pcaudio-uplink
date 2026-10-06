@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Threading.Channels;
 using NAudio.Wave;
 using WindowsPcAudioUplink.Audio;
 
@@ -6,124 +7,354 @@ namespace WindowsPcAudioUplink;
 
 public static class AudioUplink
 {
-    public static async Task RunAsync(AppSettings settings)
+    public static async Task RunAsync(AppSettings initialSettings, bool runControlServer = false)
     {
-        if (settings.ListDevices)
+        if (initialSettings.ListDevices)
         {
             AudioCaptureFactory.PrintDevices();
             return;
         }
 
-        using var capture = await AudioCaptureFactory.CreateAsync(settings);
-        var inputFormat = capture.WaveFormat;
-        var ffmpeg = FfmpegLocator.Find(settings.FfmpegPath);
-        var ffmpegFormat = WaveFormatUtilities.GetFfmpegInputFormat(inputFormat);
+        var ffmpeg = FfmpegLocator.Find(initialSettings.FfmpegPath);
+        var transportFormat = WaveFormat.CreateIeeeFloatWaveFormat(
+            initialSettings.OutputSampleRate,
+            initialSettings.OutputChannels);
 
-        using var ffmpegProcess = FfmpegProcess.Start(ffmpeg, ffmpegFormat, inputFormat.SampleRate, inputFormat.Channels, settings);
-        using var stopEvent = new ManualResetEventSlim(false);
+        using var ffmpegProcess = FfmpegProcess.Start(
+            ffmpeg,
+            "f32le",
+            transportFormat.SampleRate,
+            transportFormat.Channels,
+            initialSettings);
+        using var stopped = new CancellationTokenSource();
+        using var durationCancellation = new CancellationTokenSource();
 
-        Console.CancelKeyPress += (_, eventArgs) =>
-        {
-            eventArgs.Cancel = true;
-            stopEvent.Set();
-        };
-
+        var settings = initialSettings.Clone();
+        var stateLock = new object();
         var bytesSent = 0L;
         var silenceBytesSent = 0L;
+        var droppedPcmBytes = 0L;
         var lastLevel = 0.0;
-        var lastStatus = Stopwatch.StartNew();
         var lastAudioFrame = Stopwatch.StartNew();
-        var writeLock = new object();
-        var silenceBuffer = AudioProcessing.CreateSilenceBuffer(inputFormat, TimeSpan.FromMilliseconds(settings.SilenceChunkMs));
-        var gainMultiplier = Math.Pow(10, settings.GainDb / 20.0);
+        var lastStatus = Stopwatch.StartNew();
+        BackgroundServiceState? state = null;
 
-        capture.DataAvailable += (_, eventArgs) =>
+        void Stop(Exception? exception = null)
+        {
+            if (exception is not null)
+            {
+                Console.Error.WriteLine(exception.Message);
+            }
+
+            stopped.Cancel();
+        }
+
+        var audioQueue = Channel.CreateBounded<(byte[] Buffer, bool Silence)>(new BoundedChannelOptions(8)
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait
+        });
+        using var transportCancellation = new CancellationTokenSource();
+        var transportTask = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var packet in audioQueue.Reader.ReadAllAsync(transportCancellation.Token))
+                {
+                    await ffmpegProcess.StandardInput.BaseStream.WriteAsync(packet.Buffer, transportCancellation.Token);
+                    if (packet.Silence)
+                    {
+                        Interlocked.Add(ref silenceBytesSent, packet.Buffer.Length);
+                    }
+                    else
+                    {
+                        Interlocked.Add(ref bytesSent, packet.Buffer.Length);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (transportCancellation.IsCancellationRequested)
+            {
+                // Encerramento normal do transporte.
+            }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+            {
+                if (!stopped.IsCancellationRequested)
+                {
+                    Stop(exception);
+                }
+            }
+        });
+
+        void WritePcm(byte[] buffer, double level)
         {
             if (ffmpegProcess.HasExited)
             {
-                stopEvent.Set();
+                Stop(new InvalidOperationException("O FFmpeg encerrou durante a transmissao."));
                 return;
             }
 
-            var buffer = AudioProcessing.ApplyGain(eventArgs.Buffer, eventArgs.BytesRecorded, inputFormat, gainMultiplier);
-
-            lock (writeLock)
+            if (!audioQueue.Writer.TryWrite((buffer, false)))
             {
-                ffmpegProcess.StandardInput.BaseStream.Write(buffer, 0, eventArgs.BytesRecorded);
+                Interlocked.Add(ref droppedPcmBytes, buffer.Length);
             }
 
-            bytesSent += eventArgs.BytesRecorded;
             lastAudioFrame.Restart();
-            lastLevel = AudioProcessing.EstimateLevel(buffer, eventArgs.BytesRecorded, inputFormat);
+            lastLevel = level;
+        }
 
-            if (lastStatus.Elapsed >= TimeSpan.FromSeconds(settings.StatusIntervalSeconds))
-            {
-                Console.WriteLine($"capturando {capture.Description} | nivel {lastLevel:P0} | ganho {settings.GainDb:+0.0;-0.0;0.0} dB | pcm {bytesSent / 1024 / 1024} MiB | silencio {silenceBytesSent / 1024 / 1024} MiB");
-                lastStatus.Restart();
-            }
-        };
+        using var router = new AudioCaptureRouter(
+            transportFormat.SampleRate,
+            transportFormat.Channels,
+            WritePcm,
+            Stop);
 
-        capture.RecordingStopped += (_, eventArgs) =>
+        await router.SwitchAsync(settings);
+
+        string SourceFormat()
         {
-            if (eventArgs.Exception is not null)
-            {
-                Console.Error.WriteLine(eventArgs.Exception.Message);
-            }
+            var format = router.SourceFormat;
+            return format is null
+                ? "desconhecido"
+                : $"{format.Encoding} {format.SampleRate} Hz {format.Channels} ch {format.BitsPerSample} bit";
+        }
 
-            stopEvent.Set();
-        };
+        BackgroundServiceState SnapshotState()
+        {
+            lock (stateLock)
+            {
+                state ??= BackgroundService.CreateState(
+                    settings,
+                    router.Description,
+                    SourceFormat(),
+                    ffmpegProcess.Id);
+                state.PcmBytesSent = Interlocked.Read(ref bytesSent);
+                state.SilenceBytesSent = Interlocked.Read(ref silenceBytesSent);
+                state.DroppedPcmBytes = Interlocked.Read(ref droppedPcmBytes);
+                state.Level = lastLevel;
+                return CloneState(state);
+            }
+        }
+
+        async Task<ControlResponse> HandleControlAsync(ControlRequest request)
+        {
+            switch (request.Command)
+            {
+                case ControlCommands.Status:
+                    return new ControlResponse
+                    {
+                        Success = true,
+                        Message = "rodando",
+                        State = SnapshotState()
+                    };
+
+                case ControlCommands.Stop:
+                    return new ControlResponse
+                    {
+                        Success = true,
+                        Message = "parando",
+                        State = SnapshotState()
+                    };
+
+                case ControlCommands.SwitchCapture:
+                    if (request.Capture is null)
+                    {
+                        return new ControlResponse { Success = false, Message = "Configuracao de captura ausente." };
+                    }
+
+                    var next = settings.Clone();
+                    request.Capture.ApplyTo(next);
+                    next.CaptureConfigPath = request.CaptureConfigPath;
+                    next.CaptureMode = CaptureModes.Normalize(next.CaptureMode);
+
+                    await router.SwitchAsync(next);
+                    settings = next;
+                    lastLevel = 0;
+                    lastAudioFrame.Restart();
+                    lock (stateLock)
+                    {
+                        state ??= BackgroundService.CreateState(
+                            settings,
+                            router.Description,
+                            SourceFormat(),
+                            ffmpegProcess.Id);
+                        state.CaptureConfigPath = settings.CaptureConfigPath ?? settings.ConfigPath;
+                        state.CaptureMode = settings.CaptureMode;
+                        state.Source = router.Description;
+                        state.SourceFormat = SourceFormat();
+                        state.CaptureChangedAt = DateTimeOffset.Now;
+                        state.CaptureSwitchCount++;
+                    }
+
+                    var switchedState = SnapshotState();
+                    BackgroundService.WriteState(switchedState);
+                    Console.WriteLine($"captura trocada para {switchedState.Source} | conexao ffmpeg pid {switchedState.FfmpegProcessId} preservada");
+                    return new ControlResponse
+                    {
+                        Success = true,
+                        Message = $"captura trocada para {switchedState.Source}",
+                        State = switchedState
+                    };
+
+                default:
+                    return new ControlResponse { Success = false, Message = $"Comando desconhecido: {request.Command}" };
+            }
+        }
+
+        var serverState = SnapshotState();
+        if (runControlServer)
+        {
+            BackgroundService.WriteState(serverState);
+        }
+
+        using var controlCancellation = new CancellationTokenSource();
+        Task? controlTask = null;
+        if (runControlServer)
+        {
+            var controlServer = new ControlServer(
+                BackgroundService.PipeName,
+                HandleControlAsync,
+                () => Stop());
+            controlTask = controlServer.RunAsync(controlCancellation.Token);
+        }
+
+        Console.CancelKeyPress += HandleCancelKeyPress;
+        void HandleCancelKeyPress(object? sender, ConsoleCancelEventArgs eventArgs)
+        {
+            eventArgs.Cancel = true;
+            Stop();
+        }
 
         Console.WriteLine("windows-pcaudio-uplink");
         Console.WriteLine($"capture: {settings.CaptureMode}");
-        Console.WriteLine($"source: {capture.Description}");
-        Console.WriteLine($"format: {inputFormat.Encoding} {inputFormat.SampleRate} Hz {inputFormat.Channels} ch {inputFormat.BitsPerSample} bit");
-        Console.WriteLine($"ffmpeg: {ffmpeg}");
+        Console.WriteLine($"source: {router.Description}");
+        Console.WriteLine($"format: {SourceFormat()}");
+        Console.WriteLine($"transport: IeeeFloat {transportFormat.SampleRate} Hz {transportFormat.Channels} ch 32 bit");
+        Console.WriteLine($"ffmpeg: {ffmpeg} (pid {ffmpegProcess.Id})");
         Console.WriteLine($"target: tcp://{settings.Host}:{settings.Port} {settings.OutputFormat} {settings.AudioCodec} {settings.OutputSampleRate} Hz {settings.OutputChannels} ch{(string.IsNullOrWhiteSpace(settings.OutputSampleFormat) ? "" : $" {settings.OutputSampleFormat}")}{(string.IsNullOrWhiteSpace(settings.Bitrate) ? "" : $" {settings.Bitrate}")}");
         Console.WriteLine($"gain: {settings.GainDb:+0.0;-0.0;0.0} dB");
-        Console.WriteLine(settings.DurationSeconds > 0 ? $"parada automatica em {settings.DurationSeconds}s." : "Ctrl+C para parar.");
+        Console.WriteLine(runControlServer ? "controle local pronto." : settings.DurationSeconds > 0 ? $"parada automatica em {settings.DurationSeconds}s." : "Ctrl+C para parar.");
 
         if (settings.DurationSeconds > 0)
         {
             _ = Task.Run(async () =>
             {
-                await Task.Delay(TimeSpan.FromSeconds(settings.DurationSeconds));
-                stopEvent.Set();
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(settings.DurationSeconds), durationCancellation.Token);
+                    Stop();
+                }
+                catch (OperationCanceledException)
+                {
+                    // Encerramento normal antes da duracao configurada.
+                }
             });
         }
 
+        var silenceBuffer = AudioProcessing.CreateSilenceBuffer(
+            transportFormat,
+            TimeSpan.FromMilliseconds(settings.SilenceChunkMs));
         using var silenceTimer = new Timer(_ =>
         {
-            if (ffmpegProcess.HasExited || lastAudioFrame.Elapsed < TimeSpan.FromMilliseconds(settings.SilenceAfterMs))
+            if (stopped.IsCancellationRequested || ffmpegProcess.HasExited)
             {
                 return;
             }
 
-            lock (writeLock)
+            if (lastAudioFrame.Elapsed >= TimeSpan.FromMilliseconds(settings.SilenceAfterMs))
             {
-                if (!ffmpegProcess.HasExited)
+                if (!audioQueue.Writer.TryWrite((silenceBuffer, true)))
                 {
-                    ffmpegProcess.StandardInput.BaseStream.Write(silenceBuffer, 0, silenceBuffer.Length);
-                    silenceBytesSent += silenceBuffer.Length;
+                    Interlocked.Add(ref droppedPcmBytes, silenceBuffer.Length);
                 }
             }
-        }, null, TimeSpan.Zero, TimeSpan.FromMilliseconds(settings.SilenceChunkMs));
 
-        capture.StartRecording();
-        stopEvent.Wait();
-        capture.StopRecording();
+            if (lastStatus.Elapsed >= TimeSpan.FromSeconds(settings.StatusIntervalSeconds))
+            {
+                var snapshot = SnapshotState();
+                Console.WriteLine($"capturando {snapshot.Source} | nivel {snapshot.Level:P0} | ganho {settings.GainDb:+0.0;-0.0;0.0} dB | pcm {snapshot.PcmBytesSent / 1024 / 1024} MiB | silencio {snapshot.SilenceBytesSent / 1024 / 1024} MiB | descartado {snapshot.DroppedPcmBytes / 1024 / 1024} MiB");
+                if (runControlServer)
+                {
+                    BackgroundService.WriteState(snapshot);
+                }
+
+                lastStatus.Restart();
+            }
+        }, null, TimeSpan.Zero, TimeSpan.FromMilliseconds(Math.Max(25, settings.SilenceChunkMs)));
 
         try
         {
-            ffmpegProcess.StandardInput.Close();
+            await Task.Delay(Timeout.InfiniteTimeSpan, stopped.Token);
         }
-        catch
+        catch (OperationCanceledException)
         {
-            // O ffmpeg pode ja ter encerrado quando o servidor fecha a conexao.
+            // Encerramento solicitado pelo terminal ou canal de controle.
         }
+        finally
+        {
+            durationCancellation.Cancel();
+            controlCancellation.Cancel();
+            Console.CancelKeyPress -= HandleCancelKeyPress;
+            router.Dispose();
+            audioQueue.Writer.TryComplete();
+            transportCancellation.Cancel();
 
-        if (!ffmpegProcess.WaitForExit(settings.FfmpegExitTimeoutMs))
-        {
-            ffmpegProcess.Kill(entireProcessTree: true);
+            try
+            {
+                ffmpegProcess.StandardInput.Close();
+            }
+            catch
+            {
+                // O FFmpeg pode ja ter encerrado quando o servidor fecha a conexao.
+            }
+
+            try
+            {
+                await transportTask;
+            }
+            catch (OperationCanceledException)
+            {
+                // Encerramento normal do transporte.
+            }
+
+            if (!ffmpegProcess.WaitForExit(settings.FfmpegExitTimeoutMs))
+            {
+                ffmpegProcess.Kill(entireProcessTree: true);
+            }
+
+            if (controlTask is not null)
+            {
+                try
+                {
+                    await controlTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Encerramento normal do pipe local.
+                }
+            }
         }
+    }
+
+    static BackgroundServiceState CloneState(BackgroundServiceState state)
+    {
+        return new BackgroundServiceState
+        {
+            ProcessId = state.ProcessId,
+            FfmpegProcessId = state.FfmpegProcessId,
+            StartedAt = state.StartedAt,
+            CaptureChangedAt = state.CaptureChangedAt,
+            CaptureSwitchCount = state.CaptureSwitchCount,
+            UplinkConfigPath = state.UplinkConfigPath,
+            CaptureConfigPath = state.CaptureConfigPath,
+            CaptureMode = state.CaptureMode,
+            Source = state.Source,
+            SourceFormat = state.SourceFormat,
+            Target = state.Target,
+            PcmBytesSent = state.PcmBytesSent,
+            SilenceBytesSent = state.SilenceBytesSent,
+            DroppedPcmBytes = state.DroppedPcmBytes,
+            Level = state.Level
+        };
     }
 }
