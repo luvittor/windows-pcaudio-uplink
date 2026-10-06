@@ -10,6 +10,28 @@ dotnet run
 
 Esse modo roda em foreground quando nao existe um servidor ativo. Para iniciar em background e liberar o terminal, use `start`.
 
+## Pacote Windows
+
+Para gerar o executavel autocontido de 64 bits:
+
+```powershell
+.\tools\package.ps1
+```
+
+O script gera `dist/windows-pcaudio-uplink-win-x64.zip` e remove a pasta temporaria de publicacao. O ZIP contem somente o executavel e `configs/`. Ele nao exige uma instalacao separada do .NET, mas o FFmpeg ainda deve estar no `PATH`, instalado pelo Winget ou configurado por `--ffmpeg-path`.
+
+Uso pelo pacote:
+
+```powershell
+Expand-Archive .\dist\windows-pcaudio-uplink-win-x64.zip -DestinationPath .\windows-pcaudio-uplink
+.\windows-pcaudio-uplink\windows-pcaudio-uplink.exe start
+.\windows-pcaudio-uplink\windows-pcaudio-uplink.exe switch --capture spotify
+.\windows-pcaudio-uplink\windows-pcaudio-uplink.exe status
+.\windows-pcaudio-uplink\windows-pcaudio-uplink.exe stop
+```
+
+Os perfis ficam em `configs/` dentro do ZIP e podem ser editados sem recompilar o executavel.
+
 ## Background
 
 Iniciar com os defaults:
@@ -65,14 +87,14 @@ O status mostra os PIDs do servidor e do FFmpeg, a quantidade de trocas e os byt
 
 ## Configuracao
 
-O app le as configuracoes nesta ordem, com prioridade crescente:
+O app usa somente configuracoes separadas, nesta ordem:
 
-1. `appsettings.json` ou `--config`
-2. perfis separados `--uplink` e `--capture`
+1. `configs/defaults.json`
+2. perfis selecionados por `--uplink` e `--capture` ou pelas variaveis correspondentes
 3. variaveis de ambiente `PCAUDIO_UPLINK_*`
 4. parametros de linha de comando
 
-Os arquivos antigos `appsettings*.json` continuam funcionando. Para evoluir para UI/controle local, os perfis novos ficam separados:
+Os perfis ficam separados para permitir gerenciamento futuro por UI:
 
 - `configs/defaults.json`: aponta quais perfis iniciar quando nenhum `--uplink`/`--capture` for informado
 - `configs/uplink/*.json`: destino e formato da transmissao, abre a conexao FFmpeg/TCP
@@ -93,7 +115,7 @@ Defaults principais:
 
 ## Volume
 
-Ajuste pelo arquivo `appsettings.json`:
+Ajuste no arquivo de captura, por exemplo `configs/capture/device.json`:
 
 ```json
 {
@@ -148,12 +170,6 @@ dotnet run -- --capture-mode process --process-id 34060
 
 O modo por processo usa a API de application/process loopback do Windows e requer Windows 10 2004 build 19041 ou superior. Ele captura o processo alvo e sua arvore de filhos.
 
-## Usar outro arquivo de configuracao
-
-```powershell
-dotnet run -- --config appsettings-flac-48000-stereo16-media-player.json
-```
-
 ## Usar perfis separados
 
 Pelo caminho completo:
@@ -202,7 +218,6 @@ dotnet run -- --duration 10
 - `--process-name Microsoft.Media.Player`
 - `--process-id 34060`
 - `--capture-buffer-ms 100`
-- `--config appsettings-flac-48000-stereo16-media-player.json`
 - `--uplink flac-48000-stereo16`
 - `--capture media-player`
 - `--duration 10`
@@ -224,17 +239,13 @@ Use os parametros abaixo para gerar FLAC em 44100 Hz, 2 canais e 16-bit:
 dotnet run -- --audio-codec flac --output-format flac --output-sample-rate 44100 --output-channels 2 --output-sample-format s16
 ```
 
-Ou copie os valores de `appsettings-flac-44100-stereo16.json` para `appsettings.json`.
+Ou use o perfil `configs/uplink/flac-44100-stereo16.json`.
 
 ## Enviar FLAC 48 kHz stereo 16-bit do Reprodutor de Midia
 
 Com o Reprodutor de Midia do Windows aberto e tocando audio:
 
-```powershell
-dotnet run -- --config appsettings-flac-48000-stereo16-media-player.json
-```
-
-Ou usando perfis separados:
+Use os perfis separados:
 
 ```powershell
 dotnet run -- --uplink flac-48000-stereo16 --capture media-player
@@ -266,7 +277,7 @@ Esse perfil captura o processo do Chrome. A API de process loopback do Windows n
 dotnet run -- --run-tests
 ```
 
-Os testes cobrem configuracoes antigas e novas, parser de comandos, protocolo de controle por pipe, normalizacao de taxa/canais, hot swap, falha de troca sem perder a fonte atual, argumentos do FFmpeg, log rotativo e utilitarios de audio.
+Os testes cobrem perfis separados, parser de comandos, protocolo de controle por pipe, normalizacao de taxa/canais, hot swap, falha de troca sem perder a fonte atual, argumentos do FFmpeg, log rotativo e utilitarios de audio.
 
 ## Receptor mock local
 
@@ -302,7 +313,6 @@ Para validar o isolamento entre apps, deixe apenas um deles tocando e compare `d
 - `PCAUDIO_UPLINK_PROCESS_NAME`
 - `PCAUDIO_UPLINK_CAPTURE_BUFFER_MS`
 - `PCAUDIO_UPLINK_DURATION_SECONDS`
-- `PCAUDIO_UPLINK_CONFIG`
 - `PCAUDIO_UPLINK_UPLINK_CONFIG`
 - `PCAUDIO_UPLINK_CAPTURE_CONFIG`
 - `PCAUDIO_UPLINK_LIST_PROCESSES`

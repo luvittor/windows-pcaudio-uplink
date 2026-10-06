@@ -32,7 +32,6 @@ public sealed class AppSettings
     public int SilenceChunkMs { get; set; } = 100;
     public int StatusIntervalSeconds { get; set; } = 1;
     public int FfmpegExitTimeoutMs { get; set; } = 3000;
-    public string? ConfigPath { get; set; }
     public string? UplinkConfigPath { get; set; }
     public string? CaptureConfigPath { get; set; }
     public string? DefaultsConfigPath { get; set; }
@@ -44,12 +43,9 @@ public sealed class AppSettings
 
     public static AppSettings Load(string[] args)
     {
-        var configPath = GetConfigPath(args);
-        var settings = !string.IsNullOrWhiteSpace(configPath)
-            ? LoadFile(configPath)
-            : IsUtilityInvocation(args)
-                ? new AppSettings()
-                : LoadDefaultsAndProfiles(args);
+        var settings = IsUtilityInvocation(args)
+            ? new AppSettings()
+            : LoadDefaultsAndProfiles(args);
 
         ApplyEnvironment(settings);
         ApplyArgs(settings, args);
@@ -99,48 +95,12 @@ public sealed class AppSettings
         }
     }
 
-    internal static AppSettings LoadFromJson(string json)
-    {
-        return JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
-    }
-
     internal static AppSettings LoadFromProfileJson(string uplinkJson, string captureJson)
     {
         var settings = new AppSettings();
         UplinkSettings.LoadFromJson(uplinkJson).ApplyTo(settings);
         CaptureSettings.LoadFromJson(captureJson).ApplyTo(settings);
         return settings;
-    }
-
-    static AppSettings LoadFile(string? configuredPath)
-    {
-        var path = configuredPath;
-        if (!string.IsNullOrWhiteSpace(path) && !Path.IsPathRooted(path))
-        {
-            path = Path.Combine(Directory.GetCurrentDirectory(), path);
-        }
-
-        if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
-        {
-            var settings = LoadFromJson(File.ReadAllText(path));
-            settings.ConfigPath = path;
-            return settings;
-        }
-
-        path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        if (!File.Exists(path))
-        {
-            path = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
-        }
-
-        if (!File.Exists(path))
-        {
-            return new AppSettings();
-        }
-
-        var defaultSettings = LoadFromJson(File.ReadAllText(path));
-        defaultSettings.ConfigPath = path;
-        return defaultSettings;
     }
 
     static AppSettings LoadDefaultsAndProfiles(string[] args)
@@ -237,11 +197,6 @@ public sealed class AppSettings
     {
         var index = Array.IndexOf(args, name);
         return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
-    }
-
-    static string? GetConfigPath(string[] args)
-    {
-        return GetArgValue(args, "--config") ?? Environment.GetEnvironmentVariable("PCAUDIO_UPLINK_CONFIG");
     }
 
     static string? GetProfileSelection(string[] args, string argName, string environmentName)

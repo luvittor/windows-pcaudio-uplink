@@ -6,15 +6,16 @@ namespace WindowsPcAudioUplink.Tests;
 public static class TestRunner
 {
     static int passed;
+    static int failed;
 
     public static void Run()
     {
-        Test("config antiga continua em captureMode=device", LegacyConfigDefaultsToDevice);
-        Test("config FLAC 48000 atual preserva parametros", LegacyFlac48000ConfigKeepsOutput);
+        Test("perfil device usa captura por driver", DeviceProfileUsesDeviceMode);
+        Test("perfil FLAC 48000 preserva parametros", Flac48000ProfileKeepsOutput);
         Test("aliases de captureMode normalizam", CaptureModeAliasesNormalize);
         Test("formatos PCM/WASAPI viram formato ffmpeg correto", FfmpegInputFormatMapping);
         Test("argumentos ffmpeg preservam saida FLAC sem bitrate", FfmpegArgumentsForFlac);
-        Test("perfil novo captura Reprodutor de Midia por processo", MediaPlayerProfileUsesProcessMode);
+        Test("perfil Reprodutor de Midia captura por processo", MediaPlayerProfileUsesProcessMode);
         Test("perfis separados montam uplink e captura por driver", SplitProfilesBuildDeviceConfiguration);
         Test("defaults apontam perfis validos", DefaultsProfileBuildsConfiguration);
         Test("defaults sem campos obrigatorios falha", InvalidDefaultsFail);
@@ -39,28 +40,25 @@ public static class TestRunner
         Test("ganho PCM16 satura sem estourar", GainClampsPcm16);
         Test("match de processo aceita nome e titulo", ProcessMatchingUsesNameAndTitle);
 
-        Console.WriteLine($"tests: {passed} passed");
+        Console.WriteLine($"tests: {passed} passed, {failed} failed");
+        if (failed > 0)
+        {
+            Environment.ExitCode = 1;
+        }
     }
 
-    static void LegacyConfigDefaultsToDevice()
+    static void DeviceProfileUsesDeviceMode()
     {
-        var settings = AppSettings.LoadFromJson("""
-        {
-          "host": "192.168.15.14",
-          "port": 18080,
-          "deviceIndex": -1
-        }
-        """);
+        var settings = CaptureSettings.LoadFromJson(File.ReadAllText("configs/capture/device.json"));
 
         AssertEqual(CaptureModes.Device, CaptureModes.Normalize(settings.CaptureMode));
         AssertEqual(-1, settings.DeviceIndex);
     }
 
-    static void LegacyFlac48000ConfigKeepsOutput()
+    static void Flac48000ProfileKeepsOutput()
     {
-        var settings = AppSettings.LoadFromJson(File.ReadAllText("appsettings-flac-48000-stereo16.json"));
+        var settings = UplinkSettings.LoadFromJson(File.ReadAllText("configs/uplink/flac-48000-stereo16.json"));
 
-        AssertEqual(CaptureModes.Device, CaptureModes.Normalize(settings.CaptureMode));
         AssertEqual("flac", settings.AudioCodec);
         AssertEqual("flac", settings.OutputFormat);
         AssertEqual(48000, settings.OutputSampleRate);
@@ -106,12 +104,10 @@ public static class TestRunner
 
     static void MediaPlayerProfileUsesProcessMode()
     {
-        var settings = AppSettings.LoadFromJson(File.ReadAllText("appsettings-flac-48000-stereo16-media-player.json"));
+        var settings = CaptureSettings.LoadFromJson(File.ReadAllText("configs/capture/media-player.json"));
 
         AssertEqual(CaptureModes.Process, CaptureModes.Normalize(settings.CaptureMode));
         AssertEqual("Microsoft.Media.Player", settings.ProcessName);
-        AssertEqual("flac", settings.AudioCodec);
-        AssertEqual(48000, settings.OutputSampleRate);
     }
 
     static void SplitProfilesBuildDeviceConfiguration()
@@ -131,13 +127,19 @@ public static class TestRunner
         var defaults = DefaultsSettings.LoadFromJson(File.ReadAllText("configs/defaults.json"));
         defaults.Validate("configs/defaults.json");
 
+        var expectedUplinkPath = AppSettings.ResolveProfilePath(defaults.Uplink!, "configs", "uplink");
+        var expectedCapturePath = AppSettings.ResolveProfilePath(defaults.Capture!, "configs", "capture");
+        var expected = AppSettings.LoadFromProfileJson(
+            File.ReadAllText(expectedUplinkPath),
+            File.ReadAllText(expectedCapturePath));
+
         var settings = AppSettings.Load(["--duration", "1"]);
 
-        AssertEqual("flac", settings.AudioCodec);
-        AssertEqual(48000, settings.OutputSampleRate);
-        AssertEqual(CaptureModes.Device, settings.CaptureMode);
-        AssertEqual("flac-48000-stereo16.json", Path.GetFileName(settings.UplinkConfigPath ?? ""));
-        AssertEqual("device.json", Path.GetFileName(settings.CaptureConfigPath ?? ""));
+        AssertEqual(expected.AudioCodec, settings.AudioCodec);
+        AssertEqual(expected.OutputSampleRate, settings.OutputSampleRate);
+        AssertEqual(expected.CaptureMode, settings.CaptureMode);
+        AssertEqual(Path.GetFileName(expectedUplinkPath), Path.GetFileName(settings.UplinkConfigPath ?? ""));
+        AssertEqual(Path.GetFileName(expectedCapturePath), Path.GetFileName(settings.CaptureConfigPath ?? ""));
     }
 
     static void InvalidDefaultsFail()
@@ -216,10 +218,14 @@ public static class TestRunner
 
     static void PrintConfigFlagIsParsed()
     {
+        var defaults = DefaultsSettings.LoadFromJson(File.ReadAllText("configs/defaults.json"));
+        defaults.Validate("configs/defaults.json");
         var settings = AppSettings.Load(["--print-config"]);
 
         AssertTrue(settings.PrintResolvedConfig);
-        AssertEqual("device.json", Path.GetFileName(settings.CaptureConfigPath ?? ""));
+        AssertEqual(
+            Path.GetFileName(AppSettings.ResolveProfilePath(defaults.Capture!, "configs", "capture")),
+            Path.GetFileName(settings.CaptureConfigPath ?? ""));
     }
 
     static void BackgroundCommandsAreDetected()
@@ -451,8 +457,7 @@ public static class TestRunner
         catch (Exception exception)
         {
             Console.Error.WriteLine($"FAIL {name}: {exception.Message}");
-            Environment.ExitCode = 1;
-            throw;
+            failed++;
         }
     }
 

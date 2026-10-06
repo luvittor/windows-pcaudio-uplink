@@ -178,7 +178,7 @@ public static class AudioUplink
                             router.Description,
                             SourceFormat(),
                             ffmpegProcess.Id);
-                        state.CaptureConfigPath = settings.CaptureConfigPath ?? settings.ConfigPath;
+                        state.CaptureConfigPath = settings.CaptureConfigPath;
                         state.CaptureMode = settings.CaptureMode;
                         state.Source = router.Description;
                         state.SourceFormat = SourceFormat();

@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 
 namespace WindowsPcAudioUplink;
@@ -57,8 +56,18 @@ public static class BackgroundService
 
         TryDeleteState();
         Directory.CreateDirectory(StateDirectory);
-        var dllPath = Assembly.GetEntryAssembly()?.Location
+        var executablePath = Environment.ProcessPath
             ?? throw new InvalidOperationException("Nao foi possivel localizar o executavel atual.");
+        var launchedByDotnet = Path.GetFileNameWithoutExtension(executablePath)
+            .Equals("dotnet", StringComparison.OrdinalIgnoreCase);
+#pragma warning disable IL3000 // Usado somente quando o host atual e o dotnet, nunca no executavel single-file.
+        var assemblyPath = launchedByDotnet ? typeof(BackgroundService).Assembly.Location : null;
+#pragma warning restore IL3000
+
+        if (launchedByDotnet && string.IsNullOrWhiteSpace(assemblyPath))
+        {
+            throw new InvalidOperationException("Nao foi possivel localizar a DLL atual.");
+        }
 
         var childArgs = CommandLine.WithoutCommand(args)
             .Where(arg => !arg.Equals("--server-child", StringComparison.OrdinalIgnoreCase))
@@ -70,12 +79,15 @@ public static class BackgroundService
         TryDeleteLog();
         var startInfo = new ProcessStartInfo
         {
-            FileName = "dotnet",
+            FileName = executablePath,
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = Directory.GetCurrentDirectory()
         };
-        startInfo.ArgumentList.Add(dllPath);
+        if (assemblyPath is not null)
+        {
+            startInfo.ArgumentList.Add(assemblyPath);
+        }
         foreach (var childArg in childArgs)
         {
             startInfo.ArgumentList.Add(childArg);
@@ -153,7 +165,7 @@ public static class BackgroundService
         {
             Command = ControlCommands.SwitchCapture,
             Capture = CaptureSettings.From(settings),
-            CaptureConfigPath = settings.CaptureConfigPath ?? settings.ConfigPath
+            CaptureConfigPath = settings.CaptureConfigPath
         }, timeoutMs: 30000);
 
         if (response is null)
@@ -245,8 +257,8 @@ public static class BackgroundService
             FfmpegProcessId = ffmpegProcessId,
             StartedAt = now,
             CaptureChangedAt = now,
-            UplinkConfigPath = settings.UplinkConfigPath ?? settings.ConfigPath,
-            CaptureConfigPath = settings.CaptureConfigPath ?? settings.ConfigPath,
+            UplinkConfigPath = settings.UplinkConfigPath,
+            CaptureConfigPath = settings.CaptureConfigPath,
             CaptureMode = settings.CaptureMode,
             Source = source,
             SourceFormat = sourceFormat,
@@ -280,7 +292,7 @@ public static class BackgroundService
         {
             return ControlClient.Send(request, timeoutMs);
         }
-        catch (Exception exception) when (exception is IOException or TimeoutException or OperationCanceledException)
+        catch (Exception exception) when (exception is IOException or TimeoutException or OperationCanceledException or UnauthorizedAccessException)
         {
             return null;
         }
