@@ -18,19 +18,22 @@ Para gerar o executavel autocontido de 64 bits:
 .\tools\package.ps1
 ```
 
-O script gera `dist/windows-pcaudio-uplink-win-x64.zip` e remove a pasta temporaria de publicacao. O ZIP contem somente o executavel e `configs/`. Ele nao exige uma instalacao separada do .NET, mas o FFmpeg ainda deve estar no `PATH`, instalado pelo Winget ou configurado por `--ffmpeg-path`.
+O script gera `dist/windows-pcaudio-uplink-win-x64.zip` e remove as pastas temporarias de publicacao. O ZIP contem os dois executaveis e `configs/`. Ele nao exige uma instalacao separada do .NET, mas o FFmpeg ainda deve estar no `PATH`, instalado pelo Winget ou configurado por `--ffmpeg-path`.
 
 Uso pelo pacote:
 
 ```powershell
 Expand-Archive .\dist\windows-pcaudio-uplink-win-x64.zip -DestinationPath .\windows-pcaudio-uplink
 .\windows-pcaudio-uplink\windows-pcaudio-uplink.exe start
+.\windows-pcaudio-uplink\windows-pcaudio-uplink-tray.exe
 .\windows-pcaudio-uplink\windows-pcaudio-uplink.exe switch --capture spotify
 .\windows-pcaudio-uplink\windows-pcaudio-uplink.exe status
 .\windows-pcaudio-uplink\windows-pcaudio-uplink.exe stop
 ```
 
 Os perfis ficam em `configs/` dentro do ZIP e podem ser editados sem recompilar o executavel.
+
+O `windows-pcaudio-uplink-tray.exe` fica em segundo plano na bandeja do Windows. Clique no icone da antena para consultar o status, iniciar/parar o servidor, trocar a captura, abrir o log ou abrir as configuracoes. Ele controla o mesmo backend usado pela linha de comando.
 
 ## Background
 

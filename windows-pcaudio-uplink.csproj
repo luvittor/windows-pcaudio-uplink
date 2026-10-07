@@ -15,6 +15,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="WindowsPcAudioUplink.Tray\**" />
+    <EmbeddedResource Remove="WindowsPcAudioUplink.Tray\**" />
+    <None Remove="WindowsPcAudioUplink.Tray\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="configs\**\*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

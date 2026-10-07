@@ -1,4 +1,5 @@
-obj/*
-bin/*
-runtime/*
-dist/*
+**/obj/
+**/bin/
+**/runtime/
+dist/
+.vs/

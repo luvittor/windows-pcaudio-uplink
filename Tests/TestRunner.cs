@@ -29,6 +29,7 @@ public static class TestRunner
         Test("override --capture chrome resolve processo", CaptureOverrideResolvesChrome);
         Test("flag --print-config nao inicia audio", PrintConfigFlagIsParsed);
         Test("comandos background sao detectados", BackgroundCommandsAreDetected);
+        Test("runtime fica junto ao executavel", RuntimeDirectoryUsesApplicationBase);
         Test("comandos nao confundem valores com lifecycle", CommandsDoNotMatchOptionValues);
         Test("conversor normaliza taxa e canais para transporte fixo", PcmConverterNormalizesFormat);
         Test("hot swap troca fonte sem aceitar frames antigos", CaptureRouterHotSwapsSources);
@@ -244,6 +245,13 @@ public static class TestRunner
         AssertFalse(BackgroundService.IsSwitchCommand(["--capture", "spotify"]));
         AssertTrue(CommandLine.HasCaptureSelection(["--capture", "spotify"]));
         AssertTrue(BackgroundService.IsSwitchCommand(["switch", "--capture", "spotify"]));
+    }
+
+    static void RuntimeDirectoryUsesApplicationBase()
+    {
+        AssertEqual(
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "runtime")),
+            Path.GetFullPath(BackgroundService.RuntimeDirectory));
     }
 
     static void PcmConverterNormalizesFormat()

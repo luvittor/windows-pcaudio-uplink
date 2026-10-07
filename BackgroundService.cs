@@ -22,14 +22,22 @@ public sealed class BackgroundServiceState
     public double Level { get; set; }
 }
 
+public sealed class ServerProcessLaunch
+{
+    public required string FileName { get; init; }
+    public string? AssemblyPath { get; init; }
+    public string? WorkingDirectory { get; init; }
+}
+
 public static class BackgroundService
 {
     static readonly object StateLock = new();
-    static readonly string StateDirectory = Path.Combine(Directory.GetCurrentDirectory(), "runtime");
+    static readonly string StateDirectory = Path.Combine(AppContext.BaseDirectory, "runtime");
     static readonly string StatePath = Path.Combine(StateDirectory, "server-state.json");
     static readonly string LogPath = Path.Combine(StateDirectory, "server.log");
 
     public const string PipeName = "windows-pcaudio-uplink-control";
+    internal static string RuntimeDirectory => StateDirectory;
 
     public static bool IsStartCommand(string[] args) => CommandLine.Is(args, "start");
     public static bool IsStatusCommand(string[] args) => CommandLine.Is(args, "status");
@@ -44,8 +52,16 @@ public static class BackgroundService
         return state is not null && IsProcessRunning(state.ProcessId);
     }
 
-    public static int Start(string[] args)
+    public static int Start(string[] args, ServerProcessLaunch? launch = null)
     {
+        var runningResponse = TrySend(new ControlRequest { Command = ControlCommands.Status }, timeoutMs: 300);
+        if (runningResponse?.Success == true && runningResponse.State is not null)
+        {
+            Console.WriteLine($"ja esta rodando: pid {runningResponse.State.ProcessId}");
+            PrintState(runningResponse.State);
+            return 0;
+        }
+
         var current = ReadStateOrNull();
         if (current is not null && IsProcessRunning(current.ProcessId))
         {
@@ -56,12 +72,12 @@ public static class BackgroundService
 
         TryDeleteState();
         Directory.CreateDirectory(StateDirectory);
-        var executablePath = Environment.ProcessPath
+        var executablePath = launch?.FileName ?? Environment.ProcessPath
             ?? throw new InvalidOperationException("Nao foi possivel localizar o executavel atual.");
-        var launchedByDotnet = Path.GetFileNameWithoutExtension(executablePath)
+        var launchedByDotnet = launch?.AssemblyPath is not null || Path.GetFileNameWithoutExtension(executablePath)
             .Equals("dotnet", StringComparison.OrdinalIgnoreCase);
 #pragma warning disable IL3000 // Usado somente quando o host atual e o dotnet, nunca no executavel single-file.
-        var assemblyPath = launchedByDotnet ? typeof(BackgroundService).Assembly.Location : null;
+        var assemblyPath = launch?.AssemblyPath ?? (launchedByDotnet ? typeof(BackgroundService).Assembly.Location : null);
 #pragma warning restore IL3000
 
         if (launchedByDotnet && string.IsNullOrWhiteSpace(assemblyPath))
@@ -82,7 +98,7 @@ public static class BackgroundService
             FileName = executablePath,
             UseShellExecute = false,
             CreateNoWindow = true,
-            WorkingDirectory = Directory.GetCurrentDirectory()
+            WorkingDirectory = launch?.WorkingDirectory ?? Directory.GetCurrentDirectory()
         };
         if (assemblyPath is not null)
         {
@@ -147,12 +163,6 @@ public static class BackgroundService
 
     public static int SwitchCapture(string[] args)
     {
-        if (!IsRunning())
-        {
-            Console.Error.WriteLine("servidor parado; use: dotnet run -- start");
-            return 1;
-        }
-
         var commandArgs = IsSwitchCommand(args) ? CommandLine.WithoutCommand(args) : args;
         if (!CommandLine.HasCaptureSelection(commandArgs))
         {
@@ -170,7 +180,7 @@ public static class BackgroundService
 
         if (response is null)
         {
-            Console.Error.WriteLine("O servidor nao respondeu ao comando de troca.");
+            Console.Error.WriteLine("Servidor parado ou sem resposta ao comando de troca.");
             return 2;
         }
 
@@ -192,17 +202,26 @@ public static class BackgroundService
     public static int Stop()
     {
         var state = ReadStateOrNull();
-        if (state is null || !IsProcessRunning(state.ProcessId))
+        var response = TrySend(new ControlRequest { Command = ControlCommands.Stop });
+
+        if (response?.Success == true)
         {
-            Console.WriteLine("ja esta parado");
+            if (state is not null && WaitUntilStopped(state.ProcessId, TimeSpan.FromSeconds(5)))
+            {
+                Console.WriteLine($"parado: pid {state.ProcessId}");
+            }
+            else
+            {
+                Console.WriteLine("parada solicitada");
+            }
+
             TryDeleteState();
             return 0;
         }
 
-        var response = TrySend(new ControlRequest { Command = ControlCommands.Stop });
-        if (response?.Success == true && WaitUntilStopped(state.ProcessId, TimeSpan.FromSeconds(5)))
+        if (state is null || !IsProcessRunning(state.ProcessId))
         {
-            Console.WriteLine($"parado: pid {state.ProcessId}");
+            Console.WriteLine("ja esta parado");
             TryDeleteState();
             return 0;
         }
