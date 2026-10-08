@@ -49,6 +49,29 @@ public static class AudioUplink
             stopped.Cancel();
         }
 
+        var ffmpegExitHandled = 0;
+        void HandleFfmpegExited(object? sender, EventArgs eventArgs)
+        {
+            if (Interlocked.Exchange(ref ffmpegExitHandled, 1) != 0)
+            {
+                return;
+            }
+
+            var transportState =
+                $"transporte pcm {Interlocked.Read(ref bytesSent)} bytes, " +
+                $"silencio {Interlocked.Read(ref silenceBytesSent)} bytes, " +
+                $"descartado {Interlocked.Read(ref droppedPcmBytes)} bytes, " +
+                $"ultimo frame ha {lastAudioFrame.Elapsed.TotalSeconds:F1}s";
+            Stop(new InvalidOperationException(
+                $"{FfmpegProcess.DescribeUnexpectedExit(ffmpegProcess)} Estado no encerramento: {transportState}."));
+        }
+
+        ffmpegProcess.Exited += HandleFfmpegExited;
+        if (ffmpegProcess.HasExited)
+        {
+            HandleFfmpegExited(ffmpegProcess, EventArgs.Empty);
+        }
+
         var audioQueue = Channel.CreateBounded<(byte[] Buffer, bool Silence)>(new BoundedChannelOptions(8)
         {
             SingleReader = true,
@@ -90,7 +113,7 @@ public static class AudioUplink
         {
             if (ffmpegProcess.HasExited)
             {
-                Stop(new InvalidOperationException("O FFmpeg encerrou durante a transmissao."));
+                HandleFfmpegExited(ffmpegProcess, EventArgs.Empty);
                 return;
             }
 
@@ -275,7 +298,14 @@ public static class AudioUplink
                 Console.WriteLine($"capturando {snapshot.Source} | nivel {snapshot.Level:P0} | ganho {settings.GainDb:+0.0;-0.0;0.0} dB | pcm {snapshot.PcmBytesSent / 1024 / 1024} MiB | silencio {snapshot.SilenceBytesSent / 1024 / 1024} MiB | descartado {snapshot.DroppedPcmBytes / 1024 / 1024} MiB");
                 if (runControlServer)
                 {
-                    BackgroundService.WriteState(snapshot);
+                    try
+                    {
+                        BackgroundService.WriteState(snapshot);
+                    }
+                    catch (Exception exception)
+                    {
+                        Console.Error.WriteLine($"falha ao atualizar estado; transmissao continua: {exception.GetType().Name}: {exception.Message}");
+                    }
                 }
 
                 lastStatus.Restart();
@@ -295,6 +325,7 @@ public static class AudioUplink
             durationCancellation.Cancel();
             controlCancellation.Cancel();
             Console.CancelKeyPress -= HandleCancelKeyPress;
+            ffmpegProcess.Exited -= HandleFfmpegExited;
             router.Dispose();
             audioQueue.Writer.TryComplete();
             transportCancellation.Cancel();
@@ -319,6 +350,7 @@ public static class AudioUplink
 
             if (!ffmpegProcess.WaitForExit(settings.FfmpegExitTimeoutMs))
             {
+                Console.Error.WriteLine($"ffmpeg nao encerrou em {settings.FfmpegExitTimeoutMs} ms; finalizando a arvore do processo pid {ffmpegProcess.Id}.");
                 ffmpegProcess.Kill(entireProcessTree: true);
             }
 

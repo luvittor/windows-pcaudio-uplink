@@ -250,8 +250,14 @@ public static class BackgroundService
             return 1;
         }
 
-        Console.Write(File.ReadAllText(LogPath));
+        var lines = File.ReadAllLines(LogPath);
+        Console.WriteLine(string.Join(Environment.NewLine, OrderLogLinesDescending(lines)));
         return 0;
+    }
+
+    internal static IEnumerable<string> OrderLogLinesDescending(IEnumerable<string> lines)
+    {
+        return lines.Reverse();
     }
 
     public static void InstallServerLogging()
@@ -290,9 +296,40 @@ public static class BackgroundService
         lock (StateLock)
         {
             Directory.CreateDirectory(StateDirectory);
-            var temporaryPath = StatePath + ".tmp";
-            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(state, AppSettings.JsonOptions));
-            File.Move(temporaryPath, StatePath, overwrite: true);
+            var temporaryPath = $"{StatePath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+            var serialized = JsonSerializer.Serialize(state, AppSettings.JsonOptions);
+            try
+            {
+                for (var attempt = 1; ; attempt++)
+                {
+                    try
+                    {
+                        File.WriteAllText(temporaryPath, serialized);
+                        File.Move(temporaryPath, StatePath, overwrite: true);
+                        return;
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    {
+                        if (attempt >= 5)
+                        {
+                            throw;
+                        }
+
+                        Thread.Sleep(attempt * 25);
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch
+                {
+                    // Best-effort cleanup; the next write uses a unique temporary path.
+                }
+            }
         }
     }
 
@@ -352,7 +389,7 @@ public static class BackgroundService
             try
             {
                 return File.Exists(StatePath)
-                    ? JsonSerializer.Deserialize<BackgroundServiceState>(File.ReadAllText(StatePath), AppSettings.JsonOptions)
+                    ? JsonSerializer.Deserialize<BackgroundServiceState>(ReadSharedText(StatePath), AppSettings.JsonOptions)
                     : null;
             }
             catch
@@ -360,6 +397,13 @@ public static class BackgroundService
                 return null;
             }
         }
+    }
+
+    static string ReadSharedText(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
     }
 
     static bool IsProcessRunning(int processId)

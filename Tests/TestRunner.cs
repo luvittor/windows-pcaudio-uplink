@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NAudio.Wave;
 using WindowsPcAudioUplink.Audio;
 
@@ -15,6 +16,7 @@ public static class TestRunner
         Test("aliases de captureMode normalizam", CaptureModeAliasesNormalize);
         Test("formatos PCM/WASAPI viram formato ffmpeg correto", FfmpegInputFormatMapping);
         Test("argumentos ffmpeg preservam saida FLAC sem bitrate", FfmpegArgumentsForFlac);
+        Test("diagnostico de ffmpeg informa processo ainda ativo", FfmpegDiagnosticsForRunningProcess);
         Test("perfil Reprodutor de Midia captura por processo", MediaPlayerProfileUsesProcessMode);
         Test("perfis separados montam uplink e captura por driver", SplitProfilesBuildDeviceConfiguration);
         Test("defaults apontam perfis validos", DefaultsProfileBuildsConfiguration);
@@ -38,6 +40,7 @@ public static class TestRunner
         Test("pipe transporta hot swap e stop", ControlPipeCarriesSwitchAndStop);
         Test("perfil de uplink mock aponta para loopback", MockUplinkProfileUsesLoopback);
         Test("log rotativo limita mil linhas", RollingLogKeepsLastThousandLines);
+        Test("log e exibido do mais novo para o mais antigo", LogIsDisplayedNewestFirst);
         Test("ganho PCM16 satura sem estourar", GainClampsPcm16);
         Test("match de processo aceita nome e titulo", ProcessMatchingUsesNameAndTitle);
 
@@ -101,6 +104,16 @@ public static class TestRunner
         AssertContains("-f flac", args);
         AssertContains("tcp://127.0.0.1:18080", args);
         AssertFalse(args.Any(arg => arg.StartsWith("-b:a", StringComparison.Ordinal)));
+    }
+
+    static void FfmpegDiagnosticsForRunningProcess()
+    {
+        using var process = Process.GetCurrentProcess();
+
+        var message = FfmpegProcess.DescribeUnexpectedExit(process);
+
+        AssertTrue(message.Contains($"pid {process.Id}", StringComparison.Ordinal));
+        AssertTrue(message.Contains("processo ainda ativo", StringComparison.Ordinal));
     }
 
     static void MediaPlayerProfileUsesProcessMode()
@@ -436,6 +449,14 @@ public static class TestRunner
                 // Best-effort cleanup.
             }
         }
+    }
+
+    static void LogIsDisplayedNewestFirst()
+    {
+        var ordered = BackgroundService.OrderLogLinesDescending(["oldest", "middle", "newest"]).ToArray();
+
+        AssertEqual("newest", ordered[0]);
+        AssertEqual("oldest", ordered[^1]);
     }
 
     static void GainClampsPcm16()
