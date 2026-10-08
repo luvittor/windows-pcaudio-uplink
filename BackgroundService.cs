@@ -271,18 +271,9 @@ public static class BackgroundService
 
     static void ArchiveCurrentLog()
     {
-        if (!File.Exists(LogPath))
-        {
-            return;
-        }
-
         try
         {
-            var archiveDirectory = Path.Combine(StateDirectory, "log-archive");
-            Directory.CreateDirectory(archiveDirectory);
-            var timestamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss-fff");
-            var archivePath = Path.Combine(archiveDirectory, $"server-{timestamp}-pid{Environment.ProcessId}.log");
-            File.Move(LogPath, archivePath);
+            ArchiveLogFile(LogPath, Path.Combine(StateDirectory, "log-archive"), Environment.ProcessId);
         }
         catch (Exception exception)
         {
@@ -296,6 +287,20 @@ public static class BackgroundService
                 Diagnostics.Write("log-reset-failed", deleteException, $"logPath={LogPath}");
             }
         }
+    }
+
+    internal static string? ArchiveLogFile(string logPath, string archiveDirectory, int processId)
+    {
+        if (!File.Exists(logPath))
+        {
+            return null;
+        }
+
+        Directory.CreateDirectory(archiveDirectory);
+        var timestamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss-fff");
+        var archivePath = Path.Combine(archiveDirectory, $"server-{timestamp}-pid{processId}.log");
+        File.Move(logPath, archivePath);
+        return archivePath;
     }
 
     public static BackgroundServiceState CreateState(

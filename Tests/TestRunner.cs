@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using NAudio.Wave;
 using WindowsPcAudioUplink.Audio;
 
@@ -17,6 +19,10 @@ public static class TestRunner
         Test("formatos PCM/WASAPI viram formato ffmpeg correto", FfmpegInputFormatMapping);
         Test("argumentos ffmpeg preservam saida FLAC sem bitrate", FfmpegArgumentsForFlac);
         Test("diagnostico de ffmpeg informa processo ainda ativo", FfmpegDiagnosticsForRunningProcess);
+        Test("sessao ffmpeg reconecta depois de reset TCP", FfmpegSessionReconnectsAfterTcpReset);
+        Test("sessao ffmpeg sobrevive a dois resets TCP", FfmpegSessionReconnectsAfterTwoTcpResets);
+        Test("sessao ffmpeg reconecta quando servidor volta", FfmpegSessionReconnectsWhenServerReturns);
+        Test("sessao ffmpeg nao reconecta depois do dispose", FfmpegSessionStopsDuringReconnect);
         Test("perfil Reprodutor de Midia captura por processo", MediaPlayerProfileUsesProcessMode);
         Test("perfis separados montam uplink e captura por driver", SplitProfilesBuildDeviceConfiguration);
         Test("defaults apontam perfis validos", DefaultsProfileBuildsConfiguration);
@@ -41,6 +47,9 @@ public static class TestRunner
         Test("perfil de uplink mock aponta para loopback", MockUplinkProfileUsesLoopback);
         Test("log rotativo limita mil linhas", RollingLogKeepsLastThousandLines);
         Test("log e exibido do mais novo para o mais antigo", LogIsDisplayedNewestFirst);
+        Test("logger usa fallback quando o arquivo esta bloqueado", RollingLogFallsBackWhenLocked);
+        Test("arquivamento preserva o log anterior", LogArchivePreservesPreviousLog);
+        Test("crash report preserva contexto da excecao", CrashDiagnosticsWritesReport);
         Test("ganho PCM16 satura sem estourar", GainClampsPcm16);
         Test("match de processo aceita nome e titulo", ProcessMatchingUsesNameAndTitle);
 
@@ -114,6 +123,253 @@ public static class TestRunner
 
         AssertTrue(message.Contains($"pid {process.Id}", StringComparison.Ordinal));
         AssertTrue(message.Contains("processo ainda ativo", StringComparison.Ordinal));
+    }
+
+    static void FfmpegSessionReconnectsAfterTcpReset()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var firstConnection = new ManualResetEventSlim();
+        var secondConnection = new ManualResetEventSlim();
+        var firstPid = 0;
+        var serverTask = Task.Run(async () =>
+        {
+            using var first = await listener.AcceptTcpClientAsync(cancellation.Token);
+            firstConnection.Set();
+            using var firstStream = first.GetStream();
+            var buffer = new byte[65536];
+            _ = await firstStream.ReadAsync(buffer, cancellation.Token);
+            first.Close();
+
+            using var second = await listener.AcceptTcpClientAsync(cancellation.Token);
+            secondConnection.Set();
+            using var secondStream = second.GetStream();
+            _ = await secondStream.ReadAsync(buffer, cancellation.Token);
+        }, cancellation.Token);
+
+        var settings = new AppSettings
+        {
+            Host = "127.0.0.1",
+            Port = port,
+            AudioCodec = "flac",
+            OutputFormat = "flac",
+            OutputSampleRate = 48000,
+            OutputChannels = 2,
+            OutputSampleFormat = "s16",
+            FfmpegLogLevel = "error",
+            FfmpegExitTimeoutMs = 1000
+        };
+
+        using (var session = new FfmpegSession(
+            FfmpegLocator.Find(null),
+            "f32le",
+            48000,
+            2,
+            settings,
+            cancellation.Token))
+        {
+            AssertTrue(firstConnection.Wait(TimeSpan.FromSeconds(5)));
+            firstPid = session.ProcessId;
+            var pcm = new byte[38400];
+            for (var i = 0; i < 80 && !secondConnection.IsSet; i++)
+            {
+                session.WriteAsync(pcm, cancellation.Token).GetAwaiter().GetResult();
+                Thread.Sleep(25);
+            }
+
+            AssertTrue(secondConnection.Wait(TimeSpan.FromSeconds(5)));
+            AssertTrue(session.ProcessId != firstPid);
+        }
+
+        cancellation.Cancel();
+        listener.Stop();
+        try
+        {
+            serverTask.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            // Encerramento normal do servidor de teste.
+        }
+    }
+
+    static void FfmpegSessionReconnectsAfterTwoTcpResets()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var thirdConnection = new ManualResetEventSlim();
+        var serverTask = Task.Run(async () =>
+        {
+            for (var connectionNumber = 1; connectionNumber <= 3; connectionNumber++)
+            {
+                using var client = await listener.AcceptTcpClientAsync(cancellation.Token);
+                using var stream = client.GetStream();
+                var buffer = new byte[65536];
+                _ = await stream.ReadAsync(buffer, cancellation.Token);
+                if (connectionNumber < 3)
+                {
+                    client.Close();
+                    continue;
+                }
+
+                thirdConnection.Set();
+                await Task.Delay(200, cancellation.Token);
+            }
+        }, cancellation.Token);
+
+        using (var session = new FfmpegSession(
+            FfmpegLocator.Find(null),
+            "f32le",
+            48000,
+            2,
+            ReconnectSettings(port),
+            cancellation.Token))
+        {
+            var pcm = new byte[38400];
+            for (var i = 0; i < 180 && !thirdConnection.IsSet; i++)
+            {
+                session.WriteAsync(pcm, cancellation.Token).GetAwaiter().GetResult();
+                Thread.Sleep(25);
+            }
+
+            AssertTrue(thirdConnection.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        cancellation.Cancel();
+        listener.Stop();
+        try
+        {
+            serverTask.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            // Encerramento normal do servidor de teste.
+        }
+    }
+
+    static void FfmpegSessionStopsDuringReconnect()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var firstConnection = new ManualResetEventSlim();
+        var firstClosed = new ManualResetEventSlim();
+        var secondConnection = new ManualResetEventSlim();
+        var serverTask = Task.Run(async () =>
+        {
+            using var first = await listener.AcceptTcpClientAsync(cancellation.Token);
+            firstConnection.Set();
+            using var stream = first.GetStream();
+            var buffer = new byte[65536];
+            _ = await stream.ReadAsync(buffer, cancellation.Token);
+            first.Close();
+            firstClosed.Set();
+            try
+            {
+                using var second = await listener.AcceptTcpClientAsync(cancellation.Token);
+                secondConnection.Set();
+            }
+            catch (OperationCanceledException)
+            {
+                // A reconexao nao deve ocorrer depois do dispose.
+            }
+        }, cancellation.Token);
+
+        using (var session = new FfmpegSession(
+            FfmpegLocator.Find(null),
+            "f32le",
+            48000,
+            2,
+            ReconnectSettings(port),
+            cancellation.Token))
+        {
+            AssertTrue(firstConnection.Wait(TimeSpan.FromSeconds(5)));
+            session.WriteAsync(new byte[38400], cancellation.Token).GetAwaiter().GetResult();
+            AssertTrue(firstClosed.Wait(TimeSpan.FromSeconds(5)));
+        }
+
+        Thread.Sleep(1500);
+        AssertFalse(secondConnection.IsSet);
+        cancellation.Cancel();
+        listener.Stop();
+        try
+        {
+            serverTask.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            // Encerramento normal do servidor de teste.
+        }
+    }
+
+    static void FfmpegSessionReconnectsWhenServerReturns()
+    {
+        using var reservation = new TcpListener(IPAddress.Loopback, 0);
+        reservation.Start();
+        var port = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        reservation.Stop();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var session = new FfmpegSession(
+            FfmpegLocator.Find(null),
+            "f32le",
+            48000,
+            2,
+            ReconnectSettings(port),
+            cancellation.Token);
+
+        // Deixa a tentativa inicial e a primeira tentativa do backoff falharem.
+        Thread.Sleep(1200);
+        using var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        var connected = new ManualResetEventSlim();
+        var serverTask = Task.Run(async () =>
+        {
+            using var client = await listener.AcceptTcpClientAsync(cancellation.Token);
+            connected.Set();
+            using var stream = client.GetStream();
+            var buffer = new byte[65536];
+            _ = await stream.ReadAsync(buffer, cancellation.Token);
+        }, cancellation.Token);
+
+        var pcm = new byte[38400];
+        for (var i = 0; i < 160 && !connected.IsSet; i++)
+        {
+            session.WriteAsync(pcm, cancellation.Token).GetAwaiter().GetResult();
+            Thread.Sleep(25);
+        }
+
+        AssertTrue(connected.Wait(TimeSpan.FromSeconds(6)));
+        cancellation.Cancel();
+        listener.Stop();
+        try
+        {
+            serverTask.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            // Encerramento normal do servidor de teste.
+        }
+    }
+
+    static AppSettings ReconnectSettings(int port)
+    {
+        return new AppSettings
+        {
+            Host = "127.0.0.1",
+            Port = port,
+            AudioCodec = "flac",
+            OutputFormat = "flac",
+            OutputSampleRate = 48000,
+            OutputChannels = 2,
+            OutputSampleFormat = "s16",
+            FfmpegLogLevel = "error",
+            FfmpegExitTimeoutMs = 1000
+        };
     }
 
     static void MediaPlayerProfileUsesProcessMode()
@@ -457,6 +713,107 @@ public static class TestRunner
 
         AssertEqual("newest", ordered[0]);
         AssertEqual("oldest", ordered[^1]);
+    }
+
+    static void RollingLogFallsBackWhenLocked()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "windows-pcaudio-uplink-tests", $"{Guid.NewGuid():N}.log");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+        try
+        {
+            using (var locked = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            using (var writer = new RollingFileTextWriter(path, 1000))
+            {
+                writer.WriteLine("fallback-line");
+            }
+
+            AssertTrue(File.Exists(path + ".fallback"));
+            AssertTrue(File.ReadAllText(path + ".fallback").Contains("fallback-line", StringComparison.Ordinal));
+        }
+        finally
+        {
+            foreach (var candidate in new[] { path, path + ".fallback" })
+            {
+                try
+                {
+                    File.Delete(candidate);
+                }
+                catch
+                {
+                    // Best-effort cleanup.
+                }
+            }
+        }
+    }
+
+    static void LogArchivePreservesPreviousLog()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "windows-pcaudio-uplink-tests", Guid.NewGuid().ToString("N"));
+        var logPath = Path.Combine(root, "server.log");
+        var archive = Path.Combine(root, "log-archive");
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            File.WriteAllText(logPath, "previous log line");
+            var archivedPath = BackgroundService.ArchiveLogFile(logPath, archive, 123);
+
+            AssertTrue(archivedPath is not null);
+            AssertFalse(File.Exists(logPath));
+            AssertTrue(File.ReadAllText(archivedPath!).Contains("previous log line", StringComparison.Ordinal));
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+        }
+    }
+
+    static void CrashDiagnosticsWritesReport()
+    {
+        var directory = BackgroundService.RuntimeDirectory;
+        Directory.CreateDirectory(directory);
+        var before = Directory.GetFiles(directory, "crash-*.txt").ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            Diagnostics.WriteCrash(
+                "test-crash-report",
+                new InvalidOperationException("diagnostic marker"),
+                "test details");
+            var report = Directory.GetFiles(directory, "crash-*.txt")
+                .Where(path => !before.Contains(path, StringComparer.OrdinalIgnoreCase))
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+
+            AssertTrue(report is not null);
+            var text = File.ReadAllText(report!);
+            AssertTrue(text.Contains("test-crash-report", StringComparison.Ordinal));
+            AssertTrue(text.Contains("diagnostic marker", StringComparison.Ordinal));
+            AssertTrue(text.Contains("test details", StringComparison.Ordinal));
+        }
+        finally
+        {
+            foreach (var report in Directory.GetFiles(directory, "crash-*.txt")
+                         .Where(path => !before.Contains(path, StringComparer.OrdinalIgnoreCase)))
+            {
+                try
+                {
+                    File.Delete(report);
+                }
+                catch
+                {
+                    // Best-effort cleanup.
+                }
+            }
+        }
     }
 
     static void GainClampsPcm16()

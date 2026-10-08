@@ -9,7 +9,7 @@ public sealed class FfmpegSession : IDisposable
     readonly int sampleRate;
     readonly int channels;
     readonly AppSettings settings;
-    readonly CancellationToken lifetimeCancellation;
+    readonly CancellationTokenSource reconnectCancellation;
     readonly object gate = new();
     readonly SemaphoreSlim reconnectLock = new(1, 1);
     Process process;
@@ -28,7 +28,7 @@ public sealed class FfmpegSession : IDisposable
         this.sampleRate = sampleRate;
         this.channels = channels;
         this.settings = settings;
-        this.lifetimeCancellation = lifetimeCancellation;
+        reconnectCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetimeCancellation);
         process = StartProcess();
     }
 
@@ -103,7 +103,7 @@ public sealed class FfmpegSession : IDisposable
     {
         try
         {
-            await reconnectLock.WaitAsync(lifetimeCancellation);
+            await reconnectLock.WaitAsync(reconnectCancellation.Token);
             try
             {
                 Process current;
@@ -131,10 +131,10 @@ public sealed class FfmpegSession : IDisposable
 
                 for (var attempt = 1; ; attempt++)
                 {
-                    lifetimeCancellation.ThrowIfCancellationRequested();
+                    reconnectCancellation.Token.ThrowIfCancellationRequested();
                     var delay = TimeSpan.FromSeconds(Math.Min(30, Math.Pow(2, Math.Min(attempt - 1, 5))));
                     LogReconnect($"ffmpeg reconexao tentativa {attempt} em {delay.TotalSeconds:0}s");
-                    await Task.Delay(delay, lifetimeCancellation);
+                    await Task.Delay(delay, reconnectCancellation.Token);
 
                     try
                     {
@@ -170,7 +170,7 @@ public sealed class FfmpegSession : IDisposable
                 reconnectLock.Release();
             }
         }
-        catch (OperationCanceledException) when (lifetimeCancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (reconnectCancellation.IsCancellationRequested)
         {
             // Encerramento normal solicitado pelo uplink.
         }
@@ -212,6 +212,8 @@ public sealed class FfmpegSession : IDisposable
             disposed = true;
             current = process;
         }
+
+        reconnectCancellation.Cancel();
 
         current.Exited -= HandleExited;
         try
