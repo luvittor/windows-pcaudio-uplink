@@ -3,3 +3,4 @@
 **/runtime/
 dist/
 .vs/
+.env.local
