@@ -92,7 +92,7 @@ public static class BackgroundService
 
         _ = AppSettings.Load(childArgs.ToArray());
 
-        TryDeleteLog();
+        ArchiveCurrentLog();
         var startInfo = new ProcessStartInfo
         {
             FileName = executablePath,
@@ -267,6 +267,35 @@ public static class BackgroundService
         Console.SetOut(writer);
         Console.SetError(writer);
         Console.WriteLine("log iniciado");
+    }
+
+    static void ArchiveCurrentLog()
+    {
+        if (!File.Exists(LogPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var archiveDirectory = Path.Combine(StateDirectory, "log-archive");
+            Directory.CreateDirectory(archiveDirectory);
+            var timestamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss-fff");
+            var archivePath = Path.Combine(archiveDirectory, $"server-{timestamp}-pid{Environment.ProcessId}.log");
+            File.Move(LogPath, archivePath);
+        }
+        catch (Exception exception)
+        {
+            Diagnostics.Write("log-archive-failed", exception, $"logPath={LogPath}");
+            try
+            {
+                File.Delete(LogPath);
+            }
+            catch (Exception deleteException)
+            {
+                Diagnostics.Write("log-reset-failed", deleteException, $"logPath={LogPath}");
+            }
+        }
     }
 
     public static BackgroundServiceState CreateState(

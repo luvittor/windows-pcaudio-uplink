@@ -43,6 +43,7 @@ public static class AudioUplink
         {
             if (exception is not null)
             {
+                Diagnostics.Write("uplink-stop", exception);
                 Console.Error.WriteLine(exception.Message);
             }
 
@@ -279,36 +280,45 @@ public static class AudioUplink
             TimeSpan.FromMilliseconds(settings.SilenceChunkMs));
         using var silenceTimer = new Timer(_ =>
         {
-            if (stopped.IsCancellationRequested || ffmpegProcess.HasExited)
+            try
             {
-                return;
-            }
-
-            if (lastAudioFrame.Elapsed >= TimeSpan.FromMilliseconds(settings.SilenceAfterMs))
-            {
-                if (!audioQueue.Writer.TryWrite((silenceBuffer, true)))
+                if (stopped.IsCancellationRequested || ffmpegProcess.HasExited)
                 {
-                    Interlocked.Add(ref droppedPcmBytes, silenceBuffer.Length);
+                    return;
                 }
-            }
 
-            if (lastStatus.Elapsed >= TimeSpan.FromSeconds(settings.StatusIntervalSeconds))
-            {
-                var snapshot = SnapshotState();
-                Console.WriteLine($"capturando {snapshot.Source} | nivel {snapshot.Level:P0} | ganho {settings.GainDb:+0.0;-0.0;0.0} dB | pcm {snapshot.PcmBytesSent / 1024 / 1024} MiB | silencio {snapshot.SilenceBytesSent / 1024 / 1024} MiB | descartado {snapshot.DroppedPcmBytes / 1024 / 1024} MiB");
-                if (runControlServer)
+                if (lastAudioFrame.Elapsed >= TimeSpan.FromMilliseconds(settings.SilenceAfterMs))
                 {
-                    try
+                    if (!audioQueue.Writer.TryWrite((silenceBuffer, true)))
                     {
-                        BackgroundService.WriteState(snapshot);
-                    }
-                    catch (Exception exception)
-                    {
-                        Console.Error.WriteLine($"falha ao atualizar estado; transmissao continua: {exception.GetType().Name}: {exception.Message}");
+                        Interlocked.Add(ref droppedPcmBytes, silenceBuffer.Length);
                     }
                 }
 
-                lastStatus.Restart();
+                if (lastStatus.Elapsed >= TimeSpan.FromSeconds(settings.StatusIntervalSeconds))
+                {
+                    var snapshot = SnapshotState();
+                    Console.WriteLine($"capturando {snapshot.Source} | nivel {snapshot.Level:P0} | ganho {settings.GainDb:+0.0;-0.0;0.0} dB | pcm {snapshot.PcmBytesSent / 1024 / 1024} MiB | silencio {snapshot.SilenceBytesSent / 1024 / 1024} MiB | descartado {snapshot.DroppedPcmBytes / 1024 / 1024} MiB");
+                    if (runControlServer)
+                    {
+                        try
+                        {
+                            BackgroundService.WriteState(snapshot);
+                        }
+                        catch (Exception exception)
+                        {
+                            Diagnostics.Write("state-write-failed", exception, "transmissao continua");
+                            Console.Error.WriteLine($"falha ao atualizar estado; transmissao continua: {exception.GetType().Name}: {exception.Message}");
+                        }
+                    }
+
+                    lastStatus.Restart();
+                }
+            }
+            catch (Exception exception)
+            {
+                Diagnostics.Write("status-timer-failed", exception);
+                Console.Error.WriteLine($"falha no timer de status; transmissao continua: {exception.GetType().Name}: {exception.Message}");
             }
         }, null, TimeSpan.Zero, TimeSpan.FromMilliseconds(Math.Max(25, settings.SilenceChunkMs)));
 

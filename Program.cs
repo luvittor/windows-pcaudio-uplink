@@ -2,12 +2,29 @@ using WindowsPcAudioUplink;
 using WindowsPcAudioUplink.Audio;
 using WindowsPcAudioUplink.Tests;
 
+AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
+{
+    var exception = eventArgs.ExceptionObject as Exception
+        ?? new InvalidOperationException(eventArgs.ExceptionObject?.ToString() ?? "objeto de excecao desconhecido");
+    Diagnostics.WriteCrash(
+        "AppDomain.UnhandledException",
+        exception,
+        $"isTerminating={eventArgs.IsTerminating}");
+};
+
+TaskScheduler.UnobservedTaskException += (_, eventArgs) =>
+{
+    Diagnostics.Write("TaskScheduler.UnobservedTaskException", eventArgs.Exception);
+    eventArgs.SetObserved();
+};
+
 try
 {
     Environment.ExitCode = await RunAsync(args);
 }
 catch (Exception exception)
 {
+    Diagnostics.WriteCrash("Program.Main", exception);
     Console.Error.WriteLine($"erro: {exception.Message}");
     Environment.ExitCode = 1;
 }

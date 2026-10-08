@@ -59,9 +59,26 @@ public sealed class RollingFileTextWriter(string path, int maxLines) : TextWrite
 
     void AppendLine(string line)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.AppendAllText(path, $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] {line}{Environment.NewLine}", Encoding.UTF8);
-        TrimIfNeeded();
+        var formatted = $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] {line}{Environment.NewLine}";
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.AppendAllText(path, formatted, Encoding.UTF8);
+            TrimIfNeeded();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Um leitor externo pode manter o log aberto por alguns milissegundos.
+            // O fallback evita que uma falha de logging derrube a captura.
+            try
+            {
+                File.AppendAllText(path + ".fallback", formatted, Encoding.UTF8);
+            }
+            catch
+            {
+                System.Diagnostics.Debug.WriteLine($"Falha ao gravar log: {exception}");
+            }
+        }
     }
 
     void TrimIfNeeded()
