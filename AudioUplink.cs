@@ -20,14 +20,15 @@ public static class AudioUplink
             initialSettings.OutputSampleRate,
             initialSettings.OutputChannels);
 
-        using var ffmpegProcess = FfmpegProcess.Start(
+        using var stopped = new CancellationTokenSource();
+        using var durationCancellation = new CancellationTokenSource();
+        using var ffmpegSession = new FfmpegSession(
             ffmpeg,
             "f32le",
             transportFormat.SampleRate,
             transportFormat.Channels,
-            initialSettings);
-        using var stopped = new CancellationTokenSource();
-        using var durationCancellation = new CancellationTokenSource();
+            initialSettings,
+            stopped.Token);
 
         var settings = initialSettings.Clone();
         var stateLock = new object();
@@ -50,29 +51,6 @@ public static class AudioUplink
             stopped.Cancel();
         }
 
-        var ffmpegExitHandled = 0;
-        void HandleFfmpegExited(object? sender, EventArgs eventArgs)
-        {
-            if (Interlocked.Exchange(ref ffmpegExitHandled, 1) != 0)
-            {
-                return;
-            }
-
-            var transportState =
-                $"transporte pcm {Interlocked.Read(ref bytesSent)} bytes, " +
-                $"silencio {Interlocked.Read(ref silenceBytesSent)} bytes, " +
-                $"descartado {Interlocked.Read(ref droppedPcmBytes)} bytes, " +
-                $"ultimo frame ha {lastAudioFrame.Elapsed.TotalSeconds:F1}s";
-            Stop(new InvalidOperationException(
-                $"{FfmpegProcess.DescribeUnexpectedExit(ffmpegProcess)} Estado no encerramento: {transportState}."));
-        }
-
-        ffmpegProcess.Exited += HandleFfmpegExited;
-        if (ffmpegProcess.HasExited)
-        {
-            HandleFfmpegExited(ffmpegProcess, EventArgs.Empty);
-        }
-
         var audioQueue = Channel.CreateBounded<(byte[] Buffer, bool Silence)>(new BoundedChannelOptions(8)
         {
             SingleReader = true,
@@ -86,7 +64,7 @@ public static class AudioUplink
             {
                 await foreach (var packet in audioQueue.Reader.ReadAllAsync(transportCancellation.Token))
                 {
-                    await ffmpegProcess.StandardInput.BaseStream.WriteAsync(packet.Buffer, transportCancellation.Token);
+                    await ffmpegSession.WriteAsync(packet.Buffer, transportCancellation.Token);
                     if (packet.Silence)
                     {
                         Interlocked.Add(ref silenceBytesSent, packet.Buffer.Length);
@@ -112,12 +90,6 @@ public static class AudioUplink
 
         void WritePcm(byte[] buffer, double level)
         {
-            if (ffmpegProcess.HasExited)
-            {
-                HandleFfmpegExited(ffmpegProcess, EventArgs.Empty);
-                return;
-            }
-
             if (!audioQueue.Writer.TryWrite((buffer, false)))
             {
                 Interlocked.Add(ref droppedPcmBytes, buffer.Length);
@@ -151,7 +123,8 @@ public static class AudioUplink
                     settings,
                     router.Description,
                     SourceFormat(),
-                    ffmpegProcess.Id);
+                    ffmpegSession.ProcessId);
+                state.FfmpegProcessId = ffmpegSession.ProcessId;
                 state.PcmBytesSent = Interlocked.Read(ref bytesSent);
                 state.SilenceBytesSent = Interlocked.Read(ref silenceBytesSent);
                 state.DroppedPcmBytes = Interlocked.Read(ref droppedPcmBytes);
@@ -201,7 +174,8 @@ public static class AudioUplink
                             settings,
                             router.Description,
                             SourceFormat(),
-                            ffmpegProcess.Id);
+                            ffmpegSession.ProcessId);
+                        state.FfmpegProcessId = ffmpegSession.ProcessId;
                         state.CaptureConfigPath = settings.CaptureConfigPath;
                         state.CaptureMode = settings.CaptureMode;
                         state.Source = router.Description;
@@ -254,7 +228,7 @@ public static class AudioUplink
         Console.WriteLine($"source: {router.Description}");
         Console.WriteLine($"format: {SourceFormat()}");
         Console.WriteLine($"transport: IeeeFloat {transportFormat.SampleRate} Hz {transportFormat.Channels} ch 32 bit");
-        Console.WriteLine($"ffmpeg: {ffmpeg} (pid {ffmpegProcess.Id})");
+        Console.WriteLine($"ffmpeg: {ffmpeg} (pid {ffmpegSession.ProcessId})");
         Console.WriteLine($"target: tcp://{settings.Host}:{settings.Port} {settings.OutputFormat} {settings.AudioCodec} {settings.OutputSampleRate} Hz {settings.OutputChannels} ch{(string.IsNullOrWhiteSpace(settings.OutputSampleFormat) ? "" : $" {settings.OutputSampleFormat}")}{(string.IsNullOrWhiteSpace(settings.Bitrate) ? "" : $" {settings.Bitrate}")}");
         Console.WriteLine($"gain: {settings.GainDb:+0.0;-0.0;0.0} dB");
         Console.WriteLine(runControlServer ? "controle local pronto." : settings.DurationSeconds > 0 ? $"parada automatica em {settings.DurationSeconds}s." : "Ctrl+C para parar.");
@@ -282,7 +256,7 @@ public static class AudioUplink
         {
             try
             {
-                if (stopped.IsCancellationRequested || ffmpegProcess.HasExited)
+                if (stopped.IsCancellationRequested)
                 {
                     return;
                 }
@@ -335,19 +309,9 @@ public static class AudioUplink
             durationCancellation.Cancel();
             controlCancellation.Cancel();
             Console.CancelKeyPress -= HandleCancelKeyPress;
-            ffmpegProcess.Exited -= HandleFfmpegExited;
             router.Dispose();
             audioQueue.Writer.TryComplete();
             transportCancellation.Cancel();
-
-            try
-            {
-                ffmpegProcess.StandardInput.Close();
-            }
-            catch
-            {
-                // O FFmpeg pode ja ter encerrado quando o servidor fecha a conexao.
-            }
 
             try
             {
@@ -356,12 +320,6 @@ public static class AudioUplink
             catch (OperationCanceledException)
             {
                 // Encerramento normal do transporte.
-            }
-
-            if (!ffmpegProcess.WaitForExit(settings.FfmpegExitTimeoutMs))
-            {
-                Console.Error.WriteLine($"ffmpeg nao encerrou em {settings.FfmpegExitTimeoutMs} ms; finalizando a arvore do processo pid {ffmpegProcess.Id}.");
-                ffmpegProcess.Kill(entireProcessTree: true);
             }
 
             if (controlTask is not null)
