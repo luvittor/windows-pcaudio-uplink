@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace WindowsPcAudioUplink;
 
@@ -12,6 +13,7 @@ public sealed class FfmpegSession : IDisposable
     readonly CancellationTokenSource reconnectCancellation;
     readonly object gate = new();
     readonly SemaphoreSlim reconnectLock = new(1, 1);
+    static readonly HttpClient ReceiverClient = new() { Timeout = TimeSpan.FromSeconds(2) };
     Process process;
     bool disposed;
 
@@ -138,7 +140,14 @@ public sealed class FfmpegSession : IDisposable
 
                     try
                     {
+                        var baselineBytes = await ReadReceiverBytesAsync(reconnectCancellation.Token);
                         var next = StartProcess();
+                        if (settings.ConfirmReceiverIngest &&
+                            !await WaitForReceiverConfirmationAsync(baselineBytes, reconnectCancellation.Token))
+                        {
+                            TryTerminate(next);
+                            throw new IOException("o Mimic nao confirmou ingestao apos a reconexao");
+                        }
                         lock (gate)
                         {
                             if (disposed || !ReferenceEquals(process, current))
@@ -185,6 +194,74 @@ public sealed class FfmpegSession : IDisposable
     {
         Diagnostics.Write("ffmpeg-reconnect", details: message);
         Console.Error.WriteLine(message);
+    }
+
+    async Task<long?> ReadReceiverBytesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var uri = new Uri($"http://{settings.Host}:{settings.ReceiverStatusPort}/status");
+            using var response = await ReceiverClient.GetAsync(uri, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+            return document.RootElement.TryGetProperty("live_total_bytes", out var bytes) && bytes.TryGetInt64(out var value) ? value : null;
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            Diagnostics.Write("receiver-status-read-failed", exception);
+            return null;
+        }
+    }
+
+    async Task<bool> WaitForReceiverConfirmationAsync(long? baselineBytes, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(settings.ReceiverConfirmationTimeoutMs);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            try
+            {
+                var uri = new Uri($"http://{settings.Host}:{settings.ReceiverStatusPort}/status");
+                using var response = await ReceiverClient.GetAsync(uri, cancellationToken);
+                response.EnsureSuccessStatusCode();
+                using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+                var root = document.RootElement;
+                var connected = root.TryGetProperty("live_connected", out var live) && live.GetBoolean();
+                var hasBytes = root.TryGetProperty("live_last_bytes_at", out var lastBytes) && lastBytes.ValueKind != JsonValueKind.Null;
+                var total = root.TryGetProperty("live_total_bytes", out var totalElement) && totalElement.TryGetInt64(out var value) ? value : 0;
+                if (connected && hasBytes && (!baselineBytes.HasValue || total > baselineBytes.Value))
+                {
+                    return true;
+                }
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
+            {
+                // O Mimic pode estar trocando de sessao; continuar sondando ate o prazo.
+            }
+
+            await Task.Delay(500, cancellationToken);
+        }
+
+        return false;
+    }
+
+    static void TryTerminate(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(2000);
+            }
+        }
+        catch
+        {
+            // A tentativa de reconexao ja falhou; nao esconder o erro original.
+        }
+        finally
+        {
+            process.Dispose();
+        }
     }
 
     static string SafeProcessId(Process process)

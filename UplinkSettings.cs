@@ -15,6 +15,9 @@ public sealed class UplinkSettings
     public int OutputChannels { get; set; } = 2;
     public string? OutputSampleFormat { get; set; }
     public int FfmpegExitTimeoutMs { get; set; } = 3000;
+    public bool ConfirmReceiverIngest { get; set; } = true;
+    public int ReceiverStatusPort { get; set; } = 18081;
+    public int ReceiverConfirmationTimeoutMs { get; set; } = 10000;
 
     public static UplinkSettings LoadFromJson(string json)
     {
@@ -34,5 +37,8 @@ public sealed class UplinkSettings
         settings.OutputChannels = OutputChannels;
         settings.OutputSampleFormat = OutputSampleFormat;
         settings.FfmpegExitTimeoutMs = FfmpegExitTimeoutMs;
+        settings.ConfirmReceiverIngest = ConfirmReceiverIngest;
+        settings.ReceiverStatusPort = ReceiverStatusPort;
+        settings.ReceiverConfirmationTimeoutMs = ReceiverConfirmationTimeoutMs;
     }
 }

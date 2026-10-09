@@ -32,6 +32,9 @@ public sealed class AppSettings
     public int SilenceChunkMs { get; set; } = 100;
     public int StatusIntervalSeconds { get; set; } = 1;
     public int FfmpegExitTimeoutMs { get; set; } = 3000;
+    public bool ConfirmReceiverIngest { get; set; }
+    public int ReceiverStatusPort { get; set; } = 18081;
+    public int ReceiverConfirmationTimeoutMs { get; set; } = 10000;
     public string? UplinkConfigPath { get; set; }
     public string? CaptureConfigPath { get; set; }
     public string? DefaultsConfigPath { get; set; }
@@ -82,7 +85,8 @@ public sealed class AppSettings
         }
 
         if (DeviceIndex < -1 || CaptureBufferMs <= 0 || SilenceAfterMs < 0 ||
-            SilenceChunkMs <= 0 || StatusIntervalSeconds <= 0 || FfmpegExitTimeoutMs <= 0 || DurationSeconds < 0)
+            SilenceChunkMs <= 0 || StatusIntervalSeconds <= 0 || FfmpegExitTimeoutMs <= 0 ||
+            ReceiverStatusPort is < 1 or > 65535 || ReceiverConfirmationTimeoutMs <= 0 || DurationSeconds < 0)
         {
             throw new InvalidOperationException("Configuracao invalida: indices, buffers e intervalos estao fora do intervalo permitido.");
         }
@@ -146,6 +150,9 @@ public sealed class AppSettings
         SetInt(Environment.GetEnvironmentVariable("PCAUDIO_UPLINK_SILENCE_CHUNK_MS"), value => settings.SilenceChunkMs = value);
         SetInt(Environment.GetEnvironmentVariable("PCAUDIO_UPLINK_STATUS_INTERVAL_SECONDS"), value => settings.StatusIntervalSeconds = value);
         SetInt(Environment.GetEnvironmentVariable("PCAUDIO_UPLINK_FFMPEG_EXIT_TIMEOUT_MS"), value => settings.FfmpegExitTimeoutMs = value);
+        SetBool(Environment.GetEnvironmentVariable("PCAUDIO_UPLINK_CONFIRM_RECEIVER_INGEST"), value => settings.ConfirmReceiverIngest = value);
+        SetInt(Environment.GetEnvironmentVariable("PCAUDIO_UPLINK_RECEIVER_STATUS_PORT"), value => settings.ReceiverStatusPort = value);
+        SetInt(Environment.GetEnvironmentVariable("PCAUDIO_UPLINK_RECEIVER_CONFIRMATION_TIMEOUT_MS"), value => settings.ReceiverConfirmationTimeoutMs = value);
     }
 
     static void ApplyArgs(AppSettings settings, string[] args)
@@ -171,6 +178,9 @@ public sealed class AppSettings
         SetInt(GetArgValue(args, "--silence-chunk-ms"), value => settings.SilenceChunkMs = value);
         SetInt(GetArgValue(args, "--status-interval-seconds"), value => settings.StatusIntervalSeconds = value);
         SetInt(GetArgValue(args, "--ffmpeg-exit-timeout-ms"), value => settings.FfmpegExitTimeoutMs = value);
+        SetBool(GetArgValue(args, "--confirm-receiver-ingest"), value => settings.ConfirmReceiverIngest = value);
+        SetInt(GetArgValue(args, "--receiver-status-port"), value => settings.ReceiverStatusPort = value);
+        SetInt(GetArgValue(args, "--receiver-confirmation-timeout-ms"), value => settings.ReceiverConfirmationTimeoutMs = value);
 
         if (args.Contains("--list-devices"))
         {
