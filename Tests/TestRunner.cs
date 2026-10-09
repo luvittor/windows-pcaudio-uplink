@@ -45,6 +45,7 @@ public static class TestRunner
         Test("cliente e servidor de controle conversam pelo pipe", ControlPipeRoundTrip);
         Test("pipe transporta hot swap e stop", ControlPipeCarriesSwitchAndStop);
         Test("perfil de uplink mock aponta para loopback", MockUplinkProfileUsesLoopback);
+        Test("perfil de uplink habilita confirmacao do receptor", ProfileEnablesReceiverConfirmation);
         Test("log rotativo limita mil linhas", RollingLogKeepsLastThousandLines);
         Test("log e exibido do mais novo para o mais antigo", LogIsDisplayedNewestFirst);
         Test("logger usa fallback quando o arquivo esta bloqueado", RollingLogFallsBackWhenLocked);
@@ -672,6 +673,17 @@ public static class TestRunner
         AssertEqual(18081, settings.Port);
         AssertEqual("flac", settings.AudioCodec);
         AssertEqual(48000, settings.OutputSampleRate);
+    }
+
+    static void ProfileEnablesReceiverConfirmation()
+    {
+        var settings = UplinkSettings.LoadFromJson(File.ReadAllText("configs/uplink/flac-48000-stereo16.json"));
+        var app = new AppSettings();
+        settings.ApplyTo(app);
+
+        AssertTrue(app.ConfirmReceiverIngest);
+        AssertEqual(18081, app.ReceiverStatusPort);
+        AssertEqual(10000, app.ReceiverConfirmationTimeoutMs);
     }
 
     static void RollingLogKeepsLastThousandLines()
