@@ -46,6 +46,7 @@ public static class TestRunner
         Test("pipe transporta hot swap e stop", ControlPipeCarriesSwitchAndStop);
         Test("perfil de uplink mock aponta para loopback", MockUplinkProfileUsesLoopback);
         Test("perfil de uplink habilita confirmacao do receptor", ProfileEnablesReceiverConfirmation);
+        Test("politica de reconexao reduz ritmo apos cinco minutos", ReconnectPolicySlowsAfterFiveMinutes);
         Test("log rotativo limita mil linhas", RollingLogKeepsLastThousandLines);
         Test("log e exibido do mais novo para o mais antigo", LogIsDisplayedNewestFirst);
         Test("logger usa fallback quando o arquivo esta bloqueado", RollingLogFallsBackWhenLocked);
@@ -684,6 +685,15 @@ public static class TestRunner
         AssertTrue(app.ConfirmReceiverIngest);
         AssertEqual(18081, app.ReceiverStatusPort);
         AssertEqual(10000, app.ReceiverConfirmationTimeoutMs);
+    }
+
+    static void ReconnectPolicySlowsAfterFiveMinutes()
+    {
+        AssertEqual(TimeSpan.FromSeconds(1), ReconnectPolicy.GetDelay(1, TimeSpan.Zero));
+        AssertEqual(TimeSpan.FromSeconds(2), ReconnectPolicy.GetDelay(2, TimeSpan.FromSeconds(1)));
+        AssertEqual(TimeSpan.FromSeconds(30), ReconnectPolicy.GetDelay(20, TimeSpan.FromMinutes(4)));
+        AssertEqual(TimeSpan.FromMinutes(1), ReconnectPolicy.GetDelay(20, TimeSpan.FromMinutes(5)));
+        AssertEqual(TimeSpan.FromMinutes(1), ReconnectPolicy.GetDelay(50, TimeSpan.FromHours(2)));
     }
 
 

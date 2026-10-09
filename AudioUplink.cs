@@ -129,6 +129,10 @@ public static class AudioUplink
                 state.SilenceBytesSent = Interlocked.Read(ref silenceBytesSent);
                 state.DroppedPcmBytes = Interlocked.Read(ref droppedPcmBytes);
                 state.Level = lastLevel;
+                state.ConnectionState = ffmpegSession.ConnectionState;
+                state.ReconnectAttempt = ffmpegSession.ReconnectAttempt;
+                state.DisconnectedAt = ffmpegSession.DisconnectedAt;
+                state.NextReconnectAt = ffmpegSession.NextReconnectAt;
                 return CloneState(state);
             }
         }
@@ -354,7 +358,11 @@ public static class AudioUplink
             PcmBytesSent = state.PcmBytesSent,
             SilenceBytesSent = state.SilenceBytesSent,
             DroppedPcmBytes = state.DroppedPcmBytes,
-            Level = state.Level
+            Level = state.Level,
+            ConnectionState = state.ConnectionState,
+            ReconnectAttempt = state.ReconnectAttempt,
+            DisconnectedAt = state.DisconnectedAt,
+            NextReconnectAt = state.NextReconnectAt
         };
     }
 }

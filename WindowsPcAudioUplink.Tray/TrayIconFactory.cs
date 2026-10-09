@@ -19,7 +19,7 @@ internal static class TrayIconFactory
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool DestroyIcon(nint handle);
 
-    public static Icon Create(TrayIconFrame frame)
+    public static Icon Create(TrayIconFrame frame, Color? color = null)
     {
         using var source = new Bitmap(CanvasSize, CanvasSize, PixelFormat.Format32bppArgb);
         using (var graphics = Graphics.FromImage(source))
@@ -28,7 +28,7 @@ internal static class TrayIconFactory
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             graphics.CompositingQuality = CompositingQuality.HighQuality;
             graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            DrawDish(graphics, frame);
+            DrawDish(graphics, frame, color ?? Color.White);
         }
 
         using var bitmap = new Bitmap(32, 32, PixelFormat.Format32bppArgb);
@@ -54,11 +54,11 @@ internal static class TrayIconFactory
         }
     }
 
-    static void DrawDish(Graphics graphics, TrayIconFrame frame)
+    static void DrawDish(Graphics graphics, TrayIconFrame frame, Color color)
     {
-        using var bowlPen = CreatePen(9);
-        using var structurePen = CreatePen(8);
-        using var signalPen = CreatePen(9);
+        using var bowlPen = CreatePen(9, color);
+        using var structurePen = CreatePen(8, color);
+        using var signalPen = CreatePen(9, color);
 
         using var bowl = new GraphicsPath();
         bowl.AddBezier(31, 31, 6, 59, 30, 99, 88, 88);
@@ -70,7 +70,8 @@ internal static class TrayIconFactory
         graphics.DrawLine(structurePen, 21, 111, 68, 111);
 
         graphics.DrawLine(structurePen, 61, 62, 77, 45);
-        graphics.FillEllipse(Brushes.White, 69, 36, 18, 18);
+        using var feedBrush = new SolidBrush(color);
+        graphics.FillEllipse(feedBrush, 69, 36, 18, 18);
         var previousMode = graphics.CompositingMode;
         graphics.CompositingMode = CompositingMode.SourceCopy;
         using (var transparent = new SolidBrush(Color.Transparent))
@@ -90,9 +91,9 @@ internal static class TrayIconFactory
         }
     }
 
-    static Pen CreatePen(float width)
+    static Pen CreatePen(float width, Color color)
     {
-        return new Pen(Color.White, width)
+        return new Pen(color, width)
         {
             StartCap = LineCap.Round,
             EndCap = LineCap.Round,

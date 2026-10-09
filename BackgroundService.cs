@@ -20,6 +20,10 @@ public sealed class BackgroundServiceState
     public long SilenceBytesSent { get; set; }
     public long DroppedPcmBytes { get; set; }
     public double Level { get; set; }
+    public string ConnectionState { get; set; } = "connected";
+    public int ReconnectAttempt { get; set; }
+    public DateTimeOffset? DisconnectedAt { get; set; }
+    public DateTimeOffset? NextReconnectAt { get; set; }
 }
 
 public sealed class ServerProcessLaunch
@@ -400,6 +404,7 @@ public static class BackgroundService
         Console.WriteLine($"target: {state.Target}");
         Console.WriteLine($"trocas: {state.CaptureSwitchCount}");
         Console.WriteLine($"nivel: {state.Level:P0} | pcm {state.PcmBytesSent / 1024 / 1024} MiB | silencio {state.SilenceBytesSent / 1024 / 1024} MiB | descartado {state.DroppedPcmBytes / 1024 / 1024} MiB");
+        Console.WriteLine($"conexao: {state.ConnectionState} | tentativa {state.ReconnectAttempt}");
         Console.WriteLine($"log: {LogPath}");
     }
 

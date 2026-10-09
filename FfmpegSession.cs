@@ -12,10 +12,20 @@ public sealed class FfmpegSession : IDisposable
     readonly AppSettings settings;
     readonly CancellationTokenSource reconnectCancellation;
     readonly object gate = new();
+    readonly object connectionStateGate = new();
     readonly SemaphoreSlim reconnectLock = new(1, 1);
     static readonly HttpClient ReceiverClient = new() { Timeout = TimeSpan.FromSeconds(2) };
     Process process;
     bool disposed;
+    string connectionState = "connected";
+    int reconnectAttempt;
+    DateTimeOffset? disconnectedAt;
+    DateTimeOffset? nextReconnectAt;
+
+    public string ConnectionState { get { lock (connectionStateGate) return connectionState; } }
+    public int ReconnectAttempt { get { lock (connectionStateGate) return reconnectAttempt; } }
+    public DateTimeOffset? DisconnectedAt { get { lock (connectionStateGate) return disconnectedAt; } }
+    public DateTimeOffset? NextReconnectAt { get { lock (connectionStateGate) return nextReconnectAt; } }
 
     public FfmpegSession(
         string ffmpeg,
@@ -130,11 +140,17 @@ public sealed class FfmpegSession : IDisposable
                 }
 
                 LogReconnect($"ffmpeg desconectado: {exitSummary}; motivo={reason}");
+                SetConnectionState("reconnecting", 0, DateTimeOffset.UtcNow, null);
 
                 for (var attempt = 1; ; attempt++)
                 {
                     reconnectCancellation.Token.ThrowIfCancellationRequested();
-                    var delay = TimeSpan.FromSeconds(Math.Min(30, Math.Pow(2, Math.Min(attempt - 1, 5))));
+                    var disconnectedSince = DisconnectedAt ?? DateTimeOffset.UtcNow;
+                    var disconnectedFor = DateTimeOffset.UtcNow - disconnectedSince;
+                    var degraded = disconnectedFor >= ReconnectPolicy.DegradedAfter;
+                    var delay = ReconnectPolicy.GetDelay(attempt, disconnectedFor);
+                    var nextAttemptAt = DateTimeOffset.UtcNow + delay;
+                    SetConnectionState(degraded ? "degraded" : "reconnecting", attempt, disconnectedSince, nextAttemptAt);
                     LogReconnect($"ffmpeg reconexao tentativa {attempt} em {delay.TotalSeconds:0}s");
                     await Task.Delay(delay, reconnectCancellation.Token);
 
@@ -169,6 +185,7 @@ public sealed class FfmpegSession : IDisposable
                         var nextPid = SafeProcessId(next);
                         current.Exited -= HandleExited;
                         current.Dispose();
+                        SetConnectionState("connected", 0, null, null);
                         LogReconnect($"ffmpeg reconectado com sucesso: pid anterior {previousPid}, pid atual {nextPid}");
                         return;
                     }
@@ -199,6 +216,17 @@ public sealed class FfmpegSession : IDisposable
     {
         Diagnostics.Write("ffmpeg-reconnect", details: message);
         Console.Error.WriteLine(message);
+    }
+
+    void SetConnectionState(string value, int attempt, DateTimeOffset? disconnected, DateTimeOffset? nextAttempt)
+    {
+        lock (connectionStateGate)
+        {
+            connectionState = value;
+            reconnectAttempt = attempt;
+            disconnectedAt = disconnected;
+            nextReconnectAt = nextAttempt;
+        }
     }
 
     async Task<long?> ReadReceiverBytesAsync(CancellationToken cancellationToken)

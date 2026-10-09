@@ -14,9 +14,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
     readonly Icon noWavesIcon;
     readonly Icon oneWaveIcon;
     readonly Icon twoWavesIcon;
+    readonly Icon reconnectOffIcon;
+    readonly Icon reconnectOnIcon;
+    readonly Icon degradedOffIcon;
+    readonly Icon degradedOnIcon;
     bool operationInProgress;
     bool statusRequestInProgress;
     bool isRunning;
+    string visualState = "stopped";
     int animationFrame;
     string? lastCommandError;
 
@@ -26,6 +31,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         noWavesIcon = TrayIconFactory.Create(TrayIconFrame.NoWaves);
         oneWaveIcon = TrayIconFactory.Create(TrayIconFrame.OneWave);
         twoWavesIcon = TrayIconFactory.Create(TrayIconFrame.TwoWaves);
+        reconnectOffIcon = TrayIconFactory.Create(TrayIconFrame.NoWaves, Color.Gold);
+        reconnectOnIcon = TrayIconFactory.Create(TrayIconFrame.TwoWaves, Color.Gold);
+        degradedOffIcon = TrayIconFactory.Create(TrayIconFrame.NoWaves, Color.OrangeRed);
+        degradedOnIcon = TrayIconFactory.Create(TrayIconFrame.TwoWaves, Color.OrangeRed);
         statusItem = new ToolStripMenuItem("Status: consultando...") { Enabled = false };
 
         var menu = new ContextMenuStrip();
@@ -113,9 +122,22 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (response?.Success == true && response.State is not null)
             {
                 var state = response.State;
-                statusItem.Text = $"Status: rodando | {state.Source}";
-                notifyIcon.Text = FitNotifyText($"Uplink: {state.Source}");
-                SetRunning(true);
+                var disconnectedFor = state.DisconnectedAt.HasValue
+                    ? DateTimeOffset.UtcNow - state.DisconnectedAt.Value
+                    : TimeSpan.Zero;
+                statusItem.Text = state.ConnectionState switch
+                {
+                    "degraded" => $"Status: conexao degradada | tentativa {state.ReconnectAttempt}",
+                    "reconnecting" => $"Status: reconectando | tentativa {state.ReconnectAttempt}",
+                    _ => $"Status: transmitindo | {state.Source}"
+                };
+                notifyIcon.Text = FitNotifyText(state.ConnectionState switch
+                {
+                    "degraded" => $"Uplink degradado ha {disconnectedFor:mm\\:ss}",
+                    "reconnecting" => $"Reconectando: tentativa {state.ReconnectAttempt}",
+                    _ => "Uplink: Mimic confirmado"
+                });
+                SetConnectionVisual(state.ConnectionState);
                 return;
             }
         }
@@ -126,7 +148,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         statusItem.Text = lastCommandError is null ? "Status: parado" : $"Erro: {lastCommandError}";
         notifyIcon.Text = "Uplink: parado";
-        SetRunning(false);
+        SetConnectionVisual("stopped");
     }
 
     async Task StartBackendAsync()
@@ -146,7 +168,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         lastCommandError = null;
         statusItem.Text = "Status: parado";
         notifyIcon.Text = "Uplink: parado";
-        SetRunning(false);
+        SetConnectionVisual("stopped");
     }
 
     async Task SwitchCaptureAsync(string profile)
@@ -236,26 +258,33 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    void SetRunning(bool running)
+    void SetConnectionVisual(string state)
     {
-        if (!running)
-        {
-            isRunning = false;
-            animationTimer.Stop();
-            animationFrame = 0;
-            notifyIcon.Icon = noWavesIcon;
-            return;
-        }
-
-        if (isRunning)
+        if (visualState == state)
         {
             return;
         }
 
-        isRunning = true;
+        visualState = state;
         animationFrame = 0;
-        notifyIcon.Icon = oneWaveIcon;
-        animationTimer.Start();
+        animationTimer.Stop();
+        isRunning = state != "stopped";
+        if (state == "reconnecting")
+        {
+            animationTimer.Interval = 500;
+            notifyIcon.Icon = reconnectOffIcon;
+            animationTimer.Start();
+            return;
+        }
+        if (state == "degraded")
+        {
+            animationTimer.Interval = 2000;
+            notifyIcon.Icon = degradedOffIcon;
+            animationTimer.Start();
+            return;
+        }
+
+        notifyIcon.Icon = state == "connected" ? twoWavesIcon : noWavesIcon;
     }
 
     void AdvanceAnimation()
@@ -265,13 +294,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        animationFrame = (animationFrame + 1) % 3;
-        notifyIcon.Icon = animationFrame switch
-        {
-            0 => oneWaveIcon,
-            1 => twoWavesIcon,
-            _ => noWavesIcon
-        };
+        animationFrame = (animationFrame + 1) % 2;
+        notifyIcon.Icon = visualState == "degraded"
+            ? (animationFrame == 0 ? degradedOffIcon : degradedOnIcon)
+            : (animationFrame == 0 ? reconnectOffIcon : reconnectOnIcon);
     }
 
     void ExitTray()
@@ -283,6 +309,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         noWavesIcon.Dispose();
         oneWaveIcon.Dispose();
         twoWavesIcon.Dispose();
+        reconnectOffIcon.Dispose();
+        reconnectOnIcon.Dispose();
+        degradedOffIcon.Dispose();
+        degradedOnIcon.Dispose();
         ExitThread();
     }
 
