@@ -164,6 +164,11 @@ public sealed class FfmpegSession : IDisposable
                         LogReconnect($"ffmpeg destino de reconexao: {destination}");
                         var baselineBytes = await ReadReceiverBytesAsync(destination, reconnectCancellation.Token);
                         var next = StartProcess(destination);
+                        // O novo processo ainda nao recebe frames do loop de captura enquanto
+                        // a confirmacao esta pendente. Um frame curto de silencio permite que
+                        // o Mimic confirme a ingestao sem depender de um deadlock de estado.
+                        var confirmationFrame = new byte[Math.Max(4096, sampleRate * channels * 4 / 10)];
+                        await next.StandardInput.BaseStream.WriteAsync(confirmationFrame, reconnectCancellation.Token);
                         if (settings.ConfirmReceiverIngest &&
                             !await WaitForReceiverConfirmationAsync(destination, baselineBytes, reconnectCancellation.Token))
                         {
