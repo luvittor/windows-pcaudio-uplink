@@ -46,7 +46,6 @@ public static class TestRunner
         Test("pipe transporta hot swap e stop", ControlPipeCarriesSwitchAndStop);
         Test("perfil de uplink mock aponta para loopback", MockUplinkProfileUsesLoopback);
         Test("perfil de uplink habilita confirmacao do receptor", ProfileEnablesReceiverConfirmation);
-        Test("destinos de uplink preservam ordem e removem duplicados", UplinkDestinationsPreserveOrder);
         Test("log rotativo limita mil linhas", RollingLogKeepsLastThousandLines);
         Test("log e exibido do mais novo para o mais antigo", LogIsDisplayedNewestFirst);
         Test("logger usa fallback quando o arquivo esta bloqueado", RollingLogFallsBackWhenLocked);
@@ -687,21 +686,6 @@ public static class TestRunner
         AssertEqual(10000, app.ReceiverConfirmationTimeoutMs);
     }
 
-    static void UplinkDestinationsPreserveOrder()
-    {
-        var resolved = UplinkDestinationSelector.Resolve(
-            "192.168.15.14",
-            18080,
-            [
-                new UplinkDestination("192.168.15.18", 18080),
-                new UplinkDestination("192.168.15.14", 18080),
-                new UplinkDestination("192.168.15.18", 18080)
-            ]);
-
-        AssertEqual(2, resolved.Count);
-        AssertEqual("192.168.15.14:18080", resolved[0].ToString());
-        AssertEqual("192.168.15.18:18080", resolved[1].ToString());
-    }
 
     static void RollingLogKeepsLastThousandLines()
     {

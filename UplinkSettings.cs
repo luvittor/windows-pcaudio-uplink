@@ -6,7 +6,6 @@ public sealed class UplinkSettings
 {
     public string Host { get; set; } = "192.168.15.14";
     public int Port { get; set; } = 18080;
-    public List<UplinkDestination> Destinations { get; set; } = [];
     public string? Bitrate { get; set; } = "128k";
     public string? FfmpegPath { get; set; }
     public string FfmpegLogLevel { get; set; } = "warning";
@@ -29,7 +28,6 @@ public sealed class UplinkSettings
     {
         settings.Host = Host;
         settings.Port = Port;
-        settings.Destinations = UplinkDestinationSelector.Resolve(Host, Port, Destinations);
         settings.Bitrate = Bitrate;
         settings.FfmpegPath = FfmpegPath;
         settings.FfmpegLogLevel = FfmpegLogLevel;

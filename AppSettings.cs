@@ -9,7 +9,6 @@ public sealed class AppSettings
 
     public string Host { get; set; } = "192.168.15.14";
     public int Port { get; set; } = 18080;
-    public IReadOnlyList<UplinkDestination> Destinations { get; set; } = [];
     public string? Bitrate { get; set; } = "128k";
     public double GainDb { get; set; } = 6.0;
     public string CaptureMode { get; set; } = CaptureModes.Device;

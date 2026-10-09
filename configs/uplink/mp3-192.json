@@ -1,9 +1,6 @@
 {
   "host": "192.168.15.14",
   "port": 18080,
-  "destinations": [
-    { "host": "192.168.15.18", "port": 18080 }
-  ],
   "bitrate": "192k",
   "ffmpegPath": null,
   "ffmpegLogLevel": "warning",
