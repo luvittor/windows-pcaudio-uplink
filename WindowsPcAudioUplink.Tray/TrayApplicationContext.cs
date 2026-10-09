@@ -11,13 +11,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
     readonly System.Windows.Forms.Timer statusTimer;
     readonly System.Windows.Forms.Timer animationTimer;
     readonly ServerProcessLaunch serverLaunch;
+    readonly Icon blankIcon;
     readonly Icon noWavesIcon;
     readonly Icon oneWaveIcon;
     readonly Icon twoWavesIcon;
-    readonly Icon reconnectOffIcon;
-    readonly Icon reconnectOnIcon;
-    readonly Icon degradedOffIcon;
-    readonly Icon degradedOnIcon;
+    readonly Icon redNoWavesIcon;
+    readonly Icon redOneWaveIcon;
+    readonly Icon redTwoWavesIcon;
     bool operationInProgress;
     bool statusRequestInProgress;
     bool isRunning;
@@ -28,13 +28,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
     public TrayApplicationContext()
     {
         serverLaunch = CreateServerLaunch();
+        blankIcon = TrayIconFactory.Create(TrayIconFrame.NoWaves, Color.Transparent);
         noWavesIcon = TrayIconFactory.Create(TrayIconFrame.NoWaves);
         oneWaveIcon = TrayIconFactory.Create(TrayIconFrame.OneWave);
         twoWavesIcon = TrayIconFactory.Create(TrayIconFrame.TwoWaves);
-        reconnectOffIcon = TrayIconFactory.Create(TrayIconFrame.NoWaves, Color.Gold);
-        reconnectOnIcon = TrayIconFactory.Create(TrayIconFrame.TwoWaves, Color.Gold);
-        degradedOffIcon = TrayIconFactory.Create(TrayIconFrame.NoWaves, Color.OrangeRed);
-        degradedOnIcon = TrayIconFactory.Create(TrayIconFrame.TwoWaves, Color.OrangeRed);
+        redNoWavesIcon = TrayIconFactory.Create(TrayIconFrame.NoWaves, Color.Red);
+        redOneWaveIcon = TrayIconFactory.Create(TrayIconFrame.OneWave, Color.Red);
+        redTwoWavesIcon = TrayIconFactory.Create(TrayIconFrame.TwoWaves, Color.Red);
         statusItem = new ToolStripMenuItem("Status: consultando...") { Enabled = false };
 
         var menu = new ContextMenuStrip();
@@ -122,9 +122,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (response?.Success == true && response.State is not null)
             {
                 var state = response.State;
+                var now = DateTimeOffset.UtcNow;
                 var disconnectedFor = state.DisconnectedAt.HasValue
-                    ? DateTimeOffset.UtcNow - state.DisconnectedAt.Value
+                    ? now - state.DisconnectedAt.Value
                     : TimeSpan.Zero;
+                var isReconnecting = state.ConnectionState is "reconnecting" or "degraded";
+                var isDegraded = isReconnecting && disconnectedFor >= ReconnectPolicy.DegradedAfter;
+                var isAttempting = isReconnecting &&
+                    state.NextReconnectAt.HasValue &&
+                    now >= state.NextReconnectAt.Value;
+
                 statusItem.Text = state.ConnectionState switch
                 {
                     "degraded" => $"Status: conexao degradada | tentativa {state.ReconnectAttempt}",
@@ -137,7 +144,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     "reconnecting" => $"Reconectando: tentativa {state.ReconnectAttempt}",
                     _ => "Uplink: Mimic confirmado"
                 });
-                SetConnectionVisual(state.ConnectionState);
+
+                var nextVisualState = !isReconnecting
+                    ? "connected"
+                    : isAttempting
+                        ? (isDegraded ? "reconnect-attempt-red" : "reconnect-attempt")
+                        : (isDegraded ? "reconnect-waiting-red" : "reconnect-waiting");
+                SetConnectionVisual(nextVisualState);
                 return;
             }
         }
@@ -155,6 +168,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         statusItem.Text = "Status: iniciando...";
         notifyIcon.Text = "Uplink: iniciando";
+        SetConnectionVisual("connecting");
         var exitCode = await Task.Run(() => BackgroundService.Start([], serverLaunch));
         EnsureSuccess(exitCode, "iniciar");
         lastCommandError = null;
@@ -269,22 +283,35 @@ internal sealed class TrayApplicationContext : ApplicationContext
         animationFrame = 0;
         animationTimer.Stop();
         isRunning = state != "stopped";
-        if (state == "reconnecting")
-        {
-            animationTimer.Interval = 500;
-            notifyIcon.Icon = reconnectOffIcon;
-            animationTimer.Start();
-            return;
-        }
-        if (state == "degraded")
-        {
-            animationTimer.Interval = 2000;
-            notifyIcon.Icon = degradedOffIcon;
-            animationTimer.Start();
-            return;
-        }
 
-        notifyIcon.Icon = state == "connected" ? twoWavesIcon : noWavesIcon;
+        switch (state)
+        {
+            case "connecting":
+            case "reconnect-attempt":
+                notifyIcon.Icon = noWavesIcon;
+                animationTimer.Start();
+                return;
+            case "reconnect-attempt-red":
+                notifyIcon.Icon = redNoWavesIcon;
+                animationTimer.Start();
+                return;
+            case "connected":
+                notifyIcon.Icon = noWavesIcon;
+                animationTimer.Start();
+                return;
+            case "reconnect-waiting":
+                notifyIcon.Icon = noWavesIcon;
+                animationTimer.Start();
+                return;
+            case "reconnect-waiting-red":
+                notifyIcon.Icon = redNoWavesIcon;
+                animationTimer.Start();
+                return;
+            default:
+                isRunning = false;
+                notifyIcon.Icon = noWavesIcon;
+                return;
+        }
     }
 
     void AdvanceAnimation()
@@ -294,10 +321,62 @@ internal sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        animationFrame = (animationFrame + 1) % 2;
-        notifyIcon.Icon = visualState == "degraded"
-            ? (animationFrame == 0 ? degradedOffIcon : degradedOnIcon)
-            : (animationFrame == 0 ? reconnectOffIcon : reconnectOnIcon);
+        switch (visualState)
+        {
+            case "connected":
+                animationFrame = (animationFrame + 1) % 3;
+                notifyIcon.Icon = GetWaveIcon(animationFrame, red: false);
+                return;
+
+            case "connecting":
+            case "reconnect-attempt":
+            case "reconnect-attempt-red":
+                animationFrame = (animationFrame + 1) % 6;
+                if (animationFrame % 2 == 1)
+                {
+                    notifyIcon.Icon = blankIcon;
+                    return;
+                }
+
+                notifyIcon.Icon = GetWaveIcon(
+                    animationFrame / 2,
+                    red: visualState == "reconnect-attempt-red");
+                return;
+
+            case "reconnect-waiting":
+            case "reconnect-waiting-red":
+                animationFrame = (animationFrame + 1) % 2;
+                if (animationFrame == 1)
+                {
+                    notifyIcon.Icon = blankIcon;
+                    return;
+                }
+
+                notifyIcon.Icon = visualState == "reconnect-waiting-red"
+                    ? redNoWavesIcon
+                    : noWavesIcon;
+                return;
+        }
+    }
+
+    Icon GetWaveIcon(int frame, bool red)
+    {
+        if (red)
+        {
+            return frame switch
+            {
+                1 => redOneWaveIcon,
+                2 => redTwoWavesIcon,
+                _ => redNoWavesIcon
+            };
+        }
+
+        return frame switch
+        {
+            1 => oneWaveIcon,
+            2 => twoWavesIcon,
+            _ => noWavesIcon
+        };
     }
 
     void ExitTray()
@@ -306,13 +385,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         animationTimer.Stop();
         notifyIcon.Visible = false;
         notifyIcon.Dispose();
+        blankIcon.Dispose();
         noWavesIcon.Dispose();
         oneWaveIcon.Dispose();
         twoWavesIcon.Dispose();
-        reconnectOffIcon.Dispose();
-        reconnectOnIcon.Dispose();
-        degradedOffIcon.Dispose();
-        degradedOnIcon.Dispose();
+        redNoWavesIcon.Dispose();
+        redOneWaveIcon.Dispose();
+        redTwoWavesIcon.Dispose();
         ExitThread();
     }
 
