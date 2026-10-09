@@ -13,6 +13,8 @@ public sealed class FfmpegSession : IDisposable
     readonly CancellationTokenSource reconnectCancellation;
     readonly object gate = new();
     readonly SemaphoreSlim reconnectLock = new(1, 1);
+    readonly IReadOnlyList<UplinkDestination> destinations;
+    UplinkDestination activeDestination;
     static readonly HttpClient ReceiverClient = new() { Timeout = TimeSpan.FromSeconds(2) };
     Process process;
     bool disposed;
@@ -30,6 +32,8 @@ public sealed class FfmpegSession : IDisposable
         this.sampleRate = sampleRate;
         this.channels = channels;
         this.settings = settings;
+        destinations = UplinkDestinationSelector.Resolve(settings.Host, settings.Port, settings.Destinations.Skip(1));
+        activeDestination = destinations[0];
         reconnectCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetimeCancellation);
         process = StartProcess();
     }
@@ -76,9 +80,13 @@ public sealed class FfmpegSession : IDisposable
         }
     }
 
-    Process StartProcess()
+    Process StartProcess(UplinkDestination? destination = null)
     {
-        var started = FfmpegProcess.Start(ffmpeg, inputFormat, sampleRate, channels, settings);
+        var target = destination ?? activeDestination;
+        var processSettings = settings.Clone();
+        processSettings.Host = target.Host;
+        processSettings.Port = target.Port;
+        var started = FfmpegProcess.Start(ffmpeg, inputFormat, sampleRate, channels, processSettings);
         started.Exited += HandleExited;
         if (started.HasExited)
         {
@@ -138,16 +146,31 @@ public sealed class FfmpegSession : IDisposable
                     LogReconnect($"ffmpeg reconexao tentativa {attempt} em {delay.TotalSeconds:0}s");
                     await Task.Delay(delay, reconnectCancellation.Token);
 
-                    try
+                    var activeIndex = destinations
+                        .Select((destination, index) => (destination, index))
+                        .FirstOrDefault(item => item.destination == activeDestination)
+                        .index;
+                    if (activeIndex < 0)
                     {
-                        var baselineBytes = await ReadReceiverBytesAsync(reconnectCancellation.Token);
-                        var next = StartProcess();
+                        activeIndex = 0;
+                    }
+
+                    foreach (var destination in destinations
+                        .Skip(activeIndex)
+                        .Concat(destinations.Take(activeIndex)))
+                    {
+                        try
+                        {
+                        LogReconnect($"ffmpeg destino de reconexao: {destination}");
+                        var baselineBytes = await ReadReceiverBytesAsync(destination, reconnectCancellation.Token);
+                        var next = StartProcess(destination);
                         if (settings.ConfirmReceiverIngest &&
-                            !await WaitForReceiverConfirmationAsync(baselineBytes, reconnectCancellation.Token))
+                            !await WaitForReceiverConfirmationAsync(destination, baselineBytes, reconnectCancellation.Token))
                         {
                             TryTerminate(next);
                             throw new IOException("o Mimic nao confirmou ingestao apos a reconexao");
                         }
+                        activeDestination = destination;
                         lock (gate)
                         {
                             if (disposed || !ReferenceEquals(process, current))
@@ -166,11 +189,12 @@ public sealed class FfmpegSession : IDisposable
                         current.Dispose();
                         LogReconnect($"ffmpeg reconectado com sucesso: pid anterior {previousPid}, pid atual {nextPid}");
                         return;
-                    }
-                    catch (Exception exception) when (exception is not OperationCanceledException)
-                    {
-                        Diagnostics.Write("ffmpeg-reconnect-failed", exception, $"attempt={attempt}");
-                        Console.Error.WriteLine($"ffmpeg reconexao falhou na tentativa {attempt}: {exception.Message}");
+                        }
+                        catch (Exception exception) when (exception is not OperationCanceledException)
+                        {
+                            Diagnostics.Write("ffmpeg-reconnect-failed", exception, $"attempt={attempt}; destination={destination}");
+                            Console.Error.WriteLine($"ffmpeg reconexao falhou no destino {destination}: {exception.Message}");
+                        }
                     }
                 }
             }
@@ -196,11 +220,11 @@ public sealed class FfmpegSession : IDisposable
         Console.Error.WriteLine(message);
     }
 
-    async Task<long?> ReadReceiverBytesAsync(CancellationToken cancellationToken)
+    async Task<long?> ReadReceiverBytesAsync(UplinkDestination destination, CancellationToken cancellationToken)
     {
         try
         {
-            var uri = new Uri($"http://{settings.Host}:{settings.ReceiverStatusPort}/status");
+            var uri = new Uri($"http://{destination.Host}:{settings.ReceiverStatusPort}/status");
             using var response = await ReceiverClient.GetAsync(uri, cancellationToken);
             response.EnsureSuccessStatusCode();
             using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
@@ -213,14 +237,14 @@ public sealed class FfmpegSession : IDisposable
         }
     }
 
-    async Task<bool> WaitForReceiverConfirmationAsync(long? baselineBytes, CancellationToken cancellationToken)
+    async Task<bool> WaitForReceiverConfirmationAsync(UplinkDestination destination, long? baselineBytes, CancellationToken cancellationToken)
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(settings.ReceiverConfirmationTimeoutMs);
         while (DateTimeOffset.UtcNow < deadline)
         {
             try
             {
-                var uri = new Uri($"http://{settings.Host}:{settings.ReceiverStatusPort}/status");
+                var uri = new Uri($"http://{destination.Host}:{settings.ReceiverStatusPort}/status");
                 using var response = await ReceiverClient.GetAsync(uri, cancellationToken);
                 response.EnsureSuccessStatusCode();
                 using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
